@@ -1,0 +1,6 @@
+{
+  "name": "N – NÃO TE IRRITES",
+  "description": "Plataforma angolana de jogos online multiplayer com tabuleiro Não Te Irrites (Ludo), reações animadas, ranking e carteira multimoeda KZ & USDT.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
