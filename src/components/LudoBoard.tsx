@@ -42,6 +42,16 @@ function nearestCongruentAngle(current: number, targetBase: number, angularVel: 
   return current + diff;
 }
 
+function forwardCongruentAngle(current: number, targetBase: number, angularVel: number): number {
+  let diff = ((targetBase - current) % 360 + 540) % 360 - 180;
+  if (angularVel >= 0) {
+    while (diff < 35) diff += 360;
+  } else {
+    while (diff > -35) diff -= 360;
+  }
+  return current + diff;
+}
+
 const TurnTimerText: React.FC<{ roomId: string; fallback: number }> = React.memo(({ roomId, fallback }) => {
   const { getRoomTurnTimer, subscribeTurnTimer } = useGame();
   const [seconds, setSeconds] = useState<number>(() => getRoomTurnTimer(roomId) ?? fallback);
@@ -342,14 +352,15 @@ export const LudoBoard: React.FC = () => {
       diceMoverRef.current.style.transform = `translate3d(${dxPx.toFixed(1)}px, ${dyPx.toFixed(1)}px, 0)`;
     }
     if (diceCubeRef.current) {
-      diceCubeRef.current.style.transform = `rotateX(-24deg) rotateY(28deg) translate3d(0, ${(-elevation).toFixed(1)}px, ${elevation.toFixed(1)}px) rotateX(${rx.toFixed(1)}deg) rotateY(${ry.toFixed(1)}deg) rotateZ(${rz.toFixed(1)}deg)`;
+      diceCubeRef.current.style.transform = `rotateX(-22deg) rotateY(24deg) translate3d(0, ${(-elevation).toFixed(1)}px, ${elevation.toFixed(1)}px) rotateX(${rx.toFixed(1)}deg) rotateY(${ry.toFixed(1)}deg) rotateZ(${rz.toFixed(1)}deg)`;
     }
     if (diceShadowRef.current) {
-      const shadowScale = 1 + Math.min(0.45, elevation * 0.011);
-      const shadowOpacity = Math.max(0.18, 0.5 - elevation * 0.006);
-      const shadowOffsetY = elevation * 0.45;
+      const shadowScale = 1 + Math.min(0.55, elevation * 0.014);
+      const shadowOpacity = Math.max(0.16, 0.58 - elevation * 0.008);
+      const shadowOffsetX = elevation * 0.28;
+      const shadowOffsetY = elevation * 0.48;
       diceShadowRef.current.style.opacity = shadowOpacity.toFixed(3);
-      diceShadowRef.current.style.transform = `translate3d(-44%, -46%, 0) translateY(${shadowOffsetY.toFixed(1)}px) scale(${shadowScale.toFixed(3)})`;
+      diceShadowRef.current.style.transform = `translate3d(-44%, -46%, 0) translate(${shadowOffsetX.toFixed(1)}px, ${shadowOffsetY.toFixed(1)}px) scale(${shadowScale.toFixed(3)})`;
     }
   };
 
@@ -380,8 +391,12 @@ export const LudoBoard: React.FC = () => {
     selectedRoom
   ]);
 
-  // Launch 60fps wall-bounce & floor-bounce 3D physics roll immediately on frame 0
-  const startPhysicsThrow = (initVxPctPerSec: number, initVyPctPerSec: number) => {
+  // Launch 60fps coupled rolling physics immediately on frame 0 (supports both click-roll & drag-throw)
+  const startPhysicsThrow = (
+    initVxPctPerSec: number,
+    initVyPctPerSec: number,
+    mode: 'click' | 'throw' = 'throw'
+  ) => {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -402,42 +417,50 @@ export const LudoBoard: React.FC = () => {
     let vx = initVxPctPerSec;
     let vy = initVyPctPerSec;
 
-    // Ensure ultra-fast, energetic rolling velocity along the throw vector
     const speed = Math.hypot(vx, vy);
-    if (speed < 480) {
+    if (mode === 'click') {
+      const toCenterAngle = Math.atan2(50 - y, 50 - x) + (Math.random() - 0.5) * 1.4;
+      const clickSpeed = 240 + Math.random() * 80;
+      vx = Math.cos(toCenterAngle) * clickSpeed;
+      vy = Math.sin(toCenterAngle) * clickSpeed;
+    } else if (speed < 360) {
       const angle = speed > 5 ? Math.atan2(vy, vx) : Math.random() * Math.PI * 2;
-      vx = Math.cos(angle) * 520;
-      vy = Math.sin(angle) * 520;
-    } else if (speed > 760) {
-      const scale = 760 / speed;
+      vx = Math.cos(angle) * 400;
+      vy = Math.sin(angle) * 400;
+    } else if (speed > 720) {
+      const scale = 720 / speed;
       vx *= scale;
       vy *= scale;
     }
 
-    let z = 24;
-    let vz = 240;
+    let z = mode === 'click' ? 8 : 22;
+    let vz = mode === 'click' ? 255 : 220;
     let rx = diceRotRef.current.x;
     let ry = diceRotRef.current.y;
     let rz = diceRotRef.current.z;
 
-    let vrx = -vy * 11.8 + (Math.random() - 0.5) * 200;
-    let vry = vx * 11.8 + (Math.random() - 0.5) * 200;
-    let vrz = (vx - vy) * 3.8;
+    // Couple angular roll rate naturally to travel direction & speed (zero slipping/desync)
+    let vrx = -vy * 10.6 + (Math.random() - 0.5) * 90;
+    let vry = vx * 10.6 + (Math.random() - 0.5) * 90;
+    let vrz = (vx - vy) * 1.6;
 
     const MIN_WALL = 8.5;
     const MAX_WALL = 91.5;
-    const GRAVITY = 1750;
+    const GRAVITY = 1650;
+    const MIN_ROLL_MS = mode === 'click' ? 190 : 220;
+    const LAND_DURATION = 210;
     const startTime = performance.now();
     let lastTime = startTime;
     let lastWallSoundAt = startTime;
 
     let settling = false;
     let settleStart = 0;
-    const SETTLE_DURATION = 58;
     let sRx = rx;
     let sRy = ry;
     let sRz = rz;
     let sZ = z;
+    let sVx = vx;
+    let sVy = vy;
     let tRx = rx;
     let tRy = ry;
     let tRz = rz;
@@ -447,81 +470,81 @@ export const LudoBoard: React.FC = () => {
       lastTime = now;
       const elapsed = now - startTime;
 
-      // Move on board & collide fast with all 4 walls and corners
-      x += vx * dt;
-      y += vy * dt;
-      let hitWall = false;
-
-      if (x < MIN_WALL) {
-        x = MIN_WALL;
-        vx = Math.abs(vx) * 0.85;
-        vry = vx * 10.5;
-        vrz += (Math.random() - 0.5) * 340;
-        vz = Math.max(vz, 95);
-        hitWall = true;
-      } else if (x > MAX_WALL) {
-        x = MAX_WALL;
-        vx = -Math.abs(vx) * 0.85;
-        vry = vx * 10.5;
-        vrz += (Math.random() - 0.5) * 340;
-        vz = Math.max(vz, 95);
-        hitWall = true;
-      }
-
-      if (y < MIN_WALL) {
-        y = MIN_WALL;
-        vy = Math.abs(vy) * 0.85;
-        vrx = -vy * 10.5;
-        vrz += (Math.random() - 0.5) * 340;
-        vz = Math.max(vz, 95);
-        hitWall = true;
-      } else if (y > MAX_WALL) {
-        y = MAX_WALL;
-        vy = -Math.abs(vy) * 0.85;
-        vrx = -vy * 10.5;
-        vrz += (Math.random() - 0.5) * 340;
-        vz = Math.max(vz, 95);
-        hitWall = true;
-      }
-
-      if (hitWall && now - lastWallSoundAt > 55) {
-        lastWallSoundAt = now;
-        soundManager.playDiceWallBounce();
-      }
-
       const srv = serverRollRef.current;
       const serverReady =
         !srv.isRolling &&
-        (srv.sawRolling || srv.hasRolled || srv.lastAction !== srv.preThrowAction || elapsed > 450);
+        (srv.sawRolling || srv.hasRolled || srv.lastAction !== srv.preThrowAction || elapsed > 500);
 
       if (!settling) {
+        x += vx * dt;
+        y += vy * dt;
+        let hitWall = false;
+
+        if (x < MIN_WALL) {
+          x = MIN_WALL;
+          vx = Math.abs(vx) * 0.78;
+          vry = vx * 10.6;
+          vrz += (Math.random() - 0.5) * 180;
+          vz = Math.max(vz, 90);
+          hitWall = true;
+        } else if (x > MAX_WALL) {
+          x = MAX_WALL;
+          vx = -Math.abs(vx) * 0.78;
+          vry = vx * 10.6;
+          vrz += (Math.random() - 0.5) * 180;
+          vz = Math.max(vz, 90);
+          hitWall = true;
+        }
+
+        if (y < MIN_WALL) {
+          y = MIN_WALL;
+          vy = Math.abs(vy) * 0.78;
+          vrx = -vy * 10.6;
+          vrz += (Math.random() - 0.5) * 180;
+          vz = Math.max(vz, 90);
+          hitWall = true;
+        } else if (y > MAX_WALL) {
+          y = MAX_WALL;
+          vy = -Math.abs(vy) * 0.78;
+          vrx = -vy * 10.6;
+          vrz += (Math.random() - 0.5) * 180;
+          vz = Math.max(vz, 90);
+          hitWall = true;
+        }
+
+        if (hitWall && now - lastWallSoundAt > 65) {
+          lastWallSoundAt = now;
+          soundManager.playDiceWallBounce();
+        }
+
         vz -= GRAVITY * dt;
         z += vz * dt;
         if (z <= 0) {
           z = 0;
-          if (!serverReady && elapsed < 115) {
-            vz = Math.max(Math.abs(vz) * 0.58, 95);
-          } else if (Math.abs(vz) > 45) {
-            vz = -vz * 0.5;
-            vrx *= 0.9;
-            vry *= 0.9;
+          if (!serverReady && elapsed < MIN_ROLL_MS) {
+            vz = Math.max(Math.abs(vz) * 0.52, 85);
+          } else if (Math.abs(vz) > 48) {
+            vz = -vz * 0.45;
           } else {
             vz = 0;
           }
+        }
+
+        // When sliding on board (z === 0), gradually couple spin cleanly to board velocity
+        const friction = z > 0 ? Math.pow(0.992, dt * 60) : Math.pow(0.955, dt * 60);
+        vx *= friction;
+        vy *= friction;
+        if (z === 0) {
+          vrx = vrx * 0.4 + (-vy * 10.6) * 0.6;
+          vry = vry * 0.4 + (vx * 10.6) * 0.6;
+          vrz *= Math.pow(0.9, dt * 60);
         }
 
         rx += vrx * dt;
         ry += vry * dt;
         rz += vrz * dt;
 
-        const damp = Math.pow(0.992, dt * 60);
-        vx *= damp;
-        vy *= damp;
-        vrx *= damp;
-        vry *= damp;
-        vrz *= damp;
-
-        if (serverReady && elapsed >= 115) {
+        if (serverReady && elapsed >= MIN_ROLL_MS) {
           settling = true;
           settleStart = now;
           const targetFace = FACE_ORIENTATIONS[srv.diceValue] || FACE_ORIENTATIONS[1];
@@ -529,22 +552,33 @@ export const LudoBoard: React.FC = () => {
           sRy = ry;
           sRz = rz;
           sZ = z;
-          tRx = nearestCongruentAngle(rx, targetFace.rx, vrx);
-          tRy = nearestCongruentAngle(ry, targetFace.ry, vry);
+          sVx = vx;
+          sVy = vy;
+          tRx = forwardCongruentAngle(rx, targetFace.rx, vrx);
+          tRy = forwardCongruentAngle(ry, targetFace.ry, vry);
           tRz = nearestCongruentAngle(rz, 0, vrz);
         }
       } else {
-        const p = Math.min(1, (now - settleStart) / SETTLE_DURATION);
+        const p = Math.min(1, (now - settleStart) / LAND_DURATION);
         const ease = 1 - Math.pow(1 - p, 3);
+        const velDecay = Math.pow(1 - p, 2);
 
-        vx *= Math.pow(0.82, dt * 60);
-        vy *= Math.pow(0.82, dt * 60);
+        vx = sVx * velDecay;
+        vy = sVy * velDecay;
+        x = Math.max(MIN_WALL, Math.min(MAX_WALL, x + vx * dt));
+        y = Math.max(MIN_WALL, Math.min(MAX_WALL, y + vy * dt));
+
         rx = sRx + (tRx - sRx) * ease;
         ry = sRy + (tRy - sRy) * ease;
         rz = sRz + (tRz - sRz) * ease;
         z = sZ * (1 - ease);
 
         if (p >= 1) {
+          // Mark server state consumed BEFORE clearing isPhysicsRolling so watcher never re-spins!
+          prevServerRollingRef.current = srv.isRolling;
+          prevDiceValueRef.current = srv.diceValue;
+          prevRollActionRef.current = srv.lastAction || '';
+
           anchorPosRef.current = { x, y };
           dicePosRef.current = { x, y };
           diceRotRef.current = { x: tRx, y: tRy, z: tRz };
@@ -580,7 +614,7 @@ export const LudoBoard: React.FC = () => {
     };
   }, []);
 
-  // Watch for server-triggered rolls (e.g. Bot or online opponent) OR instant click result update
+  // Watch for server-triggered rolls (e.g. Bot or online opponent)
   const prevServerRollingRef = useRef(false);
   const prevDiceValueRef = useRef(1);
   const prevRollActionRef = useRef('');
@@ -588,14 +622,14 @@ export const LudoBoard: React.FC = () => {
     if (!selectedRoom) return;
     const bs = selectedRoom.boardState;
 
-    // Bot or remote player started a roll -> show fast 3D throw on board
+    // Bot or remote player started a roll -> show natural 3D roll on board
     if (bs.isRolling && !prevServerRollingRef.current && !isPhysicsRollingRef.current && !isDraggingDice) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = 380 + Math.random() * 140;
-      startPhysicsThrow(Math.cos(angle) * speed, Math.sin(angle) * speed);
+      const speed = 340 + Math.random() * 140;
+      startPhysicsThrow(Math.cos(angle) * speed, Math.sin(angle) * speed, 'throw');
     }
 
-    // Instant click roll (no isRolling phase) -> turn cube crisply to new face (even if same number!)
+    // Remote non-rolling result (only if not handled by our physics throw)
     const actionStr = bs.lastAction || '';
     const actionChanged = actionStr !== prevRollActionRef.current && actionStr.includes('tirou');
     if (
@@ -817,7 +851,7 @@ export const LudoBoard: React.FC = () => {
       diceRotRef.current.x,
       diceRotRef.current.y,
       diceRotRef.current.z,
-      26
+      4
     );
   };
 
@@ -837,16 +871,16 @@ export const LudoBoard: React.FC = () => {
       vy: instVy * 0.65 + velocityRef.current.vy * 0.35
     };
 
-    const nextRx = diceRotRef.current.x - dy * 2.4;
-    const nextRy = diceRotRef.current.y + dx * 2.4;
-    const nextRz = diceRotRef.current.z + (dx - dy) * 0.6;
+    const nextRx = diceRotRef.current.x - dy * 2.2;
+    const nextRy = diceRotRef.current.y + dx * 2.2;
+    const nextRz = diceRotRef.current.z + (dx - dy) * 0.45;
     lastPointerRef.current = { x: e.clientX, y: e.clientY, time: now };
 
     const rect = boardRectRef.current;
     const pctX = Math.max(9, Math.min(91, ((e.clientX - rect.left) / rect.width) * 100));
     const pctY = Math.max(9, Math.min(91, ((e.clientY - rect.top) / rect.height) * 100));
 
-    applyDiceVisuals(pctX, pctY, nextRx, nextRy, nextRz, 26);
+    applyDiceVisuals(pctX, pctY, nextRx, nextRy, nextRz, 22);
   };
 
   const handleDicePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -861,29 +895,25 @@ export const LudoBoard: React.FC = () => {
 
     const { vx, vy } = velocityRef.current;
     const throwSpeedPxMs = Math.hypot(vx, vy);
-    const didThrow = totalDragDistRef.current >= 20 || throwSpeedPxMs >= 0.16;
+    const didThrow = totalDragDistRef.current >= 16 || throwSpeedPxMs >= 0.14;
 
     if (!didThrow) {
-      // Function 1: Simple click on the dice -> stay right where it is and present result immediately
-      anchorPosRef.current = { ...dicePosRef.current };
-      if (diceMoverRef.current) {
-        diceMoverRef.current.style.transform = 'translate3d(0px, 0px, 0px)';
-      }
-      setDicePos({ ...dicePosRef.current });
-      setDiceElevation(0);
+      // Function 1: Click when stationary -> natural hop & roll right on the board (never frozen!)
       if (isMyTurn && !boardState.hasRolled && !boardState.isRolling) {
-        rollDice({ instant: true });
+        const angle = Math.random() * Math.PI * 2;
+        startPhysicsThrow(Math.cos(angle) * 280, Math.sin(angle) * 280, 'click');
+        rollDice({ instant: false });
       }
       return;
     }
 
-    // Function 2: Click & throw/launch on the board -> immediate 60fps rigid-body roll + wall bounces + server roll!
+    // Function 2: Click, drag & throw -> natural board roll along throw direction + wall bounces
     const boardWidth = boardRectRef.current.width || 500;
     const vxPctPerSec = ((vx * 1000) / boardWidth) * 100;
     const vyPctPerSec = ((vy * 1000) / boardWidth) * 100;
 
     if (isMyTurn && !boardState.hasRolled && !boardState.isRolling) {
-      startPhysicsThrow(vxPctPerSec, vyPctPerSec);
+      startPhysicsThrow(vxPctPerSec, vyPctPerSec, 'throw');
       rollDice({ instant: false });
     } else {
       anchorPosRef.current = { ...dicePosRef.current };
@@ -899,8 +929,8 @@ export const LudoBoard: React.FC = () => {
   const handleLaunchButtonClick = () => {
     if (!isMyTurn || boardState.hasRolled || boardState.isRolling || isPhysicsRollingRef.current) return;
     const angle = Math.random() * Math.PI * 2;
-    const speed = 440 + Math.random() * 180;
-    startPhysicsThrow(Math.cos(angle) * speed, Math.sin(angle) * speed);
+    const speed = 380 + Math.random() * 140;
+    startPhysicsThrow(Math.cos(angle) * speed, Math.sin(angle) * speed, 'throw');
     rollDice({ instant: false });
   };
 
@@ -1321,8 +1351,8 @@ export const LudoBoard: React.FC = () => {
                   {isMyTurn && !boardState.hasRolled && !boardState.isRolling && !isPhysicsRolling && (
                     <div className="absolute -top-9 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[9px] font-black px-2.5 py-0.5 rounded-full border border-yellow-400 whitespace-nowrap pointer-events-none tracking-wider z-40">
                       {isDraggingDice
-                        ? 'LANCE NO TABULEIRO! 🎲'
-                        : 'CLIQUE OU ARRASTE PARA LANÇAR! 🎲'}
+                        ? 'SOLTE PARA LANÇAR! 🎲'
+                        : 'CLIQUE PARA ROLAR OU ARRASTE! 🎲'}
                     </div>
                   )}
 
@@ -1527,7 +1557,7 @@ export const LudoBoard: React.FC = () => {
                       <span className="text-yellow-400">Escolha uma peça para mover!</span>
                     ) : (
                       <span className="text-red-400">
-                        Clique no dado para ver o resultado direto ou arraste e lance no tabuleiro para rolar!
+                        Clique no dado para rolar ou arraste e lance no tabuleiro!
                       </span>
                     )
                   ) : (
