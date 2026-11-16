@@ -98,21 +98,24 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
 
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone.replace('+244', '').trim());
-  const [password, setPassword] = useState(currentUser.password || 'senhasegura2026');
+  const [password, setPassword] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(currentUser.avatar);
   const [showPassword, setShowPassword] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveError(null);
     if (!name.trim()) {
-      alert('Por favor introduza o seu nome.');
+      setSaveError('Por favor introduza o seu nome.');
       return;
     }
     if (!phone.trim()) {
-      alert('Por favor introduza o seu número de telemóvel.');
+      setSaveError('Por favor introduza o seu número de telemóvel.');
       return;
     }
 
@@ -120,18 +123,26 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
       ? phone.trim()
       : `+244 ${phone.trim()}`;
 
-    updateProfile({
+    setSaving(true);
+    const res = await updateProfile({
       name: name.trim(),
       phone: formattedPhone,
-      password: password.trim(),
+      password: password.trim() || undefined,
       avatar: selectedAvatar
     });
+    setSaving(false);
 
+    if (!res.ok) {
+      setSaveError(res.error || 'Não foi possível guardar as alterações.');
+      return;
+    }
+
+    setPassword('');
     setSaveSuccess(true);
     setTimeout(() => {
       setSaveSuccess(false);
       onClose();
-    }, 1200);
+    }, 1000);
   };
 
   return (
@@ -157,6 +168,12 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
             </p>
           </div>
         </div>
+
+        {saveError && (
+          <div className="mb-4 p-3.5 rounded-xl bg-red-950/80 border border-red-500 text-red-300 text-xs font-bold">
+            {saveError}
+          </div>
+        )}
 
         {saveSuccess && (
           <div className="mb-4 p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500 text-emerald-300 text-xs font-bold flex items-center gap-2 animate-bounce">
@@ -274,16 +291,15 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
             {/* Palavra-passe */}
             <div>
               <label className="text-xs font-bold text-neutral-300 block mb-1">
-                Palavra-passe (Passe):
+                Nova Palavra-passe <span className="text-[10px] text-neutral-400 font-normal">(opcional)</span>:
               </label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-neutral-500 absolute left-3.5 top-3.5" />
                 <input
                   type={showPassword ? 'text' : 'password'}
-                  required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="Deixe em branco para manter a atual"
                   className="w-full bg-neutral-950 border border-neutral-700 rounded-xl pl-10 pr-11 py-3 text-sm text-white focus:outline-none focus:border-red-500 font-mono"
                 />
                 <button
@@ -295,7 +311,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
                 </button>
               </div>
               <span className="text-[10px] text-neutral-500 mt-1 block">
-                Esta é a sua palavra-passe de acesso ao jogo.
+                A palavra-passe é guardada com encriptação segura no servidor.
               </span>
             </div>
           </div>
@@ -311,10 +327,11 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
             </button>
             <button
               type="submit"
-              className="flex-1 py-3 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-lg shadow-red-950 transition-all flex items-center justify-center gap-2"
+              disabled={saving}
+              className="flex-1 py-3 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-lg shadow-red-950 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Check className="w-4 h-4" />
-              <span>Guardar Alterações</span>
+              <span>{saving ? 'A guardar...' : 'Guardar Alterações'}</span>
             </button>
           </div>
         </form>

@@ -17,7 +17,20 @@ import { AuthView } from './components/AuthView';
 import { ShieldCheck, Heart } from 'lucide-react';
 
 function MainLayout() {
-  const { activeTab, setActiveTab, isLoggedIn } = useGame();
+  const { activeTab, isLoggedIn, authLoading } = useGame();
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0c0d10] text-neutral-100 flex flex-col items-center justify-center p-6">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-red-600 via-neutral-900 to-black border-2 border-yellow-500/80 flex items-center justify-center shadow-lg shadow-red-950/60 mb-4 animate-pulse">
+          <span className="font-black text-3xl text-yellow-400">N</span>
+        </div>
+        <p className="text-xs font-bold uppercase tracking-widest text-yellow-400">
+          A carregar a sua conta...
+        </p>
+      </div>
+    );
+  }
 
   if (!isLoggedIn) {
     return <AuthView />;

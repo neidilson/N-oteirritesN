@@ -3,7 +3,7 @@ import { useGame } from '../context/GameContext';
 import { ShieldCheck, Shield, Mail, Lock, User, ArrowRight, KeyRound, Users } from 'lucide-react';
 
 export const AuthView: React.FC = () => {
-  const { login, loginAdmin, pendingInviteCode } = useGame();
+  const { register, login, loginAdmin, pendingInviteCode } = useGame();
   const [mode, setModeState] = useState<'register' | 'login' | 'admin'>(() => {
     try {
       const saved = sessionStorage.getItem('nti_auth_mode');
@@ -17,6 +17,7 @@ export const AuthView: React.FC = () => {
   const setMode = (m: 'register' | 'login' | 'admin') => {
     setModeState(m);
     setAuthError(null);
+    setAdminError(null);
     try {
       sessionStorage.setItem('nti_auth_mode', m);
     } catch {
@@ -32,13 +33,14 @@ export const AuthView: React.FC = () => {
   const [termsAccepted, setTermsAccepted] = useState(true);
   const [ageVerified, setAgeVerified] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // Form Fields for Admin
   const [adminPin, setAdminPin] = useState('');
   const [adminError, setAdminError] = useState<string | null>(null);
 
-  // Handler for Player Registration (Direct login, NO OTP)
-  const handleRegister = (e: React.FormEvent) => {
+  // Handler for Player Registration
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
     if (!termsAccepted || !ageVerified) {
@@ -58,18 +60,21 @@ export const AuthView: React.FC = () => {
       return;
     }
 
-    login({
+    setSubmitting(true);
+    const res = await register({
       name: name.trim(),
       phone: `+244 ${phone.trim()}`,
-      email: email.trim() || `${name.toLowerCase().replace(/\s+/g, '')}@jogador.ao`,
-      password: password.trim(),
-      isAgeVerified: true,
-      isIdentityVerified: true
+      email: email.trim(),
+      password: password.trim()
     });
+    setSubmitting(false);
+    if (!res.ok) {
+      setAuthError(res.error || 'Não foi possível criar a conta.');
+    }
   };
 
-  // Handler for Player Login (Direct login, NO OTP)
-  const handleLogin = (e: React.FormEvent) => {
+  // Handler for Player Login
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
     if (!phone.trim()) {
@@ -81,28 +86,32 @@ export const AuthView: React.FC = () => {
       return;
     }
 
-    login({
-      name: name.trim() || 'Jogador Angola',
+    setSubmitting(true);
+    const res = await login({
       phone: `+244 ${phone.trim()}`,
-      email: email.trim() || 'jogador@ao.net',
-      password: password.trim(),
-      isAgeVerified: true,
-      isIdentityVerified: true
+      password: password.trim()
     });
-  };
-
-  // Handler for Admin Login (Checked against secure code database)
-  const handleAdminSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setAdminError(null);
-    const success = loginAdmin(adminPin);
-    if (!success) {
-      setAdminError('PIN incorreto. Acesso restrito à administração da plataforma.');
+    setSubmitting(false);
+    if (!res.ok) {
+      setAuthError(res.error || 'Telemóvel ou palavra-passe incorretos.');
     }
   };
 
-  // Quick fill helper for Player demo
+  // Handler for Admin Login
+  const handleAdminSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminError(null);
+    setSubmitting(true);
+    const res = await loginAdmin(adminPin);
+    setSubmitting(false);
+    if (!res.ok) {
+      setAdminError(res.error || 'PIN incorreto. Acesso restrito à administração da plataforma.');
+    }
+  };
+
+  // Quick fill helper for seeded example player (switches to login mode)
   const handleQuickDemo = () => {
+    setMode('login');
     setAuthError(null);
     setName('Kassoma Manuel');
     setPhone('923884102');
@@ -263,10 +272,11 @@ export const AuthView: React.FC = () => {
 
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2"
+                disabled={submitting}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
               >
                 <Shield className="w-4 h-4" />
-                <span>ENTRAR COMO ADMINISTRADOR</span>
+                <span>{submitting ? 'A VALIDAR PIN...' : 'ENTRAR COMO ADMINISTRADOR'}</span>
               </button>
             </form>
           </div>
@@ -382,9 +392,10 @@ export const AuthView: React.FC = () => {
 
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2 mt-4"
+                disabled={submitting}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2 mt-4 disabled:opacity-60"
               >
-                <span>CADASTRAR E ENTRAR NO JOGO</span>
+                <span>{submitting ? 'A CRIAR CONTA...' : 'CADASTRAR E ENTRAR NO JOGO'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
 
@@ -394,7 +405,7 @@ export const AuthView: React.FC = () => {
                   onClick={handleQuickDemo}
                   className="text-[11px] text-yellow-400 hover:text-white underline decoration-dotted"
                 >
-                  ⚡ Preencher com dados de exemplo (Kassoma Manuel)
+                  ⚡ Entrar com conta de exemplo (Kassoma Manuel)
                 </button>
               </div>
             </form>
@@ -448,27 +459,12 @@ export const AuthView: React.FC = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="text-xs font-bold text-neutral-400 block mb-1">
-                  Email <span className="text-[10px] text-yellow-400 font-normal">(Opcional)</span>:
-                </label>
-                <div className="relative">
-                  <Mail className="w-4 h-4 text-neutral-500 absolute left-3 top-3" />
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="email@exemplo.ao (opcional)"
-                    className="w-full bg-neutral-950 border border-neutral-700 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-yellow-500"
-                  />
-                </div>
-              </div>
-
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2 mt-4"
+                disabled={submitting}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-95 shadow-xl shadow-red-950 transition-all flex items-center justify-center gap-2 mt-4 disabled:opacity-60"
               >
-                <span>ENTRAR NO JOGO</span>
+                <span>{submitting ? 'A ENTRAR...' : 'ENTRAR NO JOGO'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
 
@@ -478,7 +474,7 @@ export const AuthView: React.FC = () => {
                   onClick={handleQuickDemo}
                   className="text-[11px] text-yellow-400 hover:text-white underline decoration-dotted"
                 >
-                  ⚡ Preencher com dados de exemplo (Kassoma Manuel)
+                  ⚡ Preencher conta de exemplo (Kassoma Manuel)
                 </button>
               </div>
             </form>

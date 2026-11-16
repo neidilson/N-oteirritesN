@@ -162,6 +162,8 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
   const [proofUrl, setProofUrl] = useState('');
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [submittedNotice, setSubmittedNotice] = useState<string | null>(null);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [submittingUnlock, setSubmittingUnlock] = useState(false);
 
   if (!isOpen) return null;
 
@@ -192,16 +194,25 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
     reader.readAsDataURL(file);
   };
 
-  const handleSubmitUnlock = (e: React.FormEvent) => {
+  const handleSubmitUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!payingTheme) return;
-    requestThemeUnlock({
+    setUnlockError(null);
+    setSubmittingUnlock(true);
+    const res = await requestThemeUnlock({
       themeId: payingTheme.id,
       currency: payCurrency,
       method: payMethod,
       reference: payReference.trim() || `PAG-${payingTheme.id.toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`,
       proofUrl: proofUrl || undefined
     });
+    setSubmittingUnlock(false);
+
+    if (!res.ok) {
+      setUnlockError(res.error || 'Não foi possível enviar o pedido de desbloqueio.');
+      return;
+    }
+
     setSubmittedNotice(
       `Pagamento de "${payingTheme.name}" enviado! Assim que o Administrador N confirmar o pagamento real, o tabuleiro será desbloqueado na sua conta.`
     );
@@ -426,12 +437,21 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
                 </div>
               </div>
 
+              {unlockError && (
+                <div className="p-2.5 rounded-xl bg-red-950/70 border border-red-600 text-red-300 text-xs font-bold">
+                  {unlockError}
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 flex items-center justify-center gap-2 shadow-lg"
+                disabled={submittingUnlock}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 flex items-center justify-center gap-2 shadow-lg disabled:opacity-60"
               >
                 <CreditCard className="w-4 h-4" />
-                Enviar Pagamento Real para Confirmação do Admin
+                {submittingUnlock
+                  ? 'A enviar comprovativo...'
+                  : 'Enviar Pagamento Real para Confirmação do Admin'}
               </button>
             </form>
           </div>

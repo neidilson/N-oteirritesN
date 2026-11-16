@@ -7,14 +7,19 @@ export const SupportView: React.FC = () => {
   const [msgInput, setMsgInput] = useState('');
   const [selectedSubject, setSelectedSubject] = useState('Dúvida sobre Depósitos Multicaixa Express / USDT');
   const [openFaq, setOpenFaq] = useState<number | null>(null);
+  const [sending, setSending] = useState(false);
 
   const userTicket = supportTickets.find((t) => t.userId === currentUser.id);
 
-  const handleSend = (e: React.FormEvent) => {
+  const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!msgInput.trim()) return;
-    sendSupportMessage(msgInput, selectedSubject);
-    setMsgInput('');
+    if (!msgInput.trim() || sending) return;
+    setSending(true);
+    const res = await sendSupportMessage(msgInput, selectedSubject);
+    setSending(false);
+    if (res.ok) {
+      setMsgInput('');
+    }
   };
 
   const FAQS = [

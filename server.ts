@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -15,7 +15,8 @@ import type {
   PlayerCategory,
   ChatMessage,
   BoardThemeId,
-  PlatformConfig
+  PlatformConfig,
+  PaymentMethod
 } from './src/types/index.ts';
 import {
   SAFE_CELLS,
@@ -25,6 +26,14 @@ import {
   getRandomPositiveExpression,
   getRandomNegativeExpression
 } from './src/utils/ludoRules.ts';
+import {
+  db,
+  DEFAULT_PLATFORM_CONFIG,
+  verifySessionToken,
+  createSessionToken,
+  verifyAdminPin,
+  type SessionClaims
+} from './src/db/repository.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +47,7 @@ interface ClientMeta {
   userName: string;
   userAvatar: string;
   userCategory: PlayerCategory;
+  isAdmin: boolean;
   roomId: string | null;
 }
 
@@ -45,77 +55,19 @@ const roomsMap = new Map<string, Room>();
 const clientsMap = new Map<WebSocket, ClientMeta>();
 const rollingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const botTurnTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+const roomMatchEpoch = new Map<string, number>();
 
-const PLATFORM_CONFIG_FILE = process.env.PLATFORM_CONFIG_PATH || '/tmp/nti_platform_config.json';
+let platformConfig: PlatformConfig = DEFAULT_PLATFORM_CONFIG;
 
-const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
-  winnerPercent: 75,
-  commissionPercent: 25,
-  themePrices: {
-    classic: { priceKz: 0, priceUsdt: 0 },
-    kingdoms: { priceKz: 15000, priceUsdt: 16 },
-    football: { priceKz: 25000, priceUsdt: 27 },
-    future: { priceKz: 20000, priceUsdt: 22 },
-    gang: { priceKz: 18000, priceUsdt: 20 },
-    egyptian: { priceKz: 22000, priceUsdt: 24 }
-  }
-};
-
-function sanitizePlatformConfig(raw: Partial<PlatformConfig> | null | undefined): PlatformConfig {
-  const base = DEFAULT_PLATFORM_CONFIG;
-  let winnerPercent = Number(raw?.winnerPercent);
-  let commissionPercent = Number(raw?.commissionPercent);
-
-  if (Number.isFinite(winnerPercent) && !Number.isFinite(commissionPercent)) {
-    winnerPercent = Math.min(99, Math.max(1, Math.round(winnerPercent)));
-    commissionPercent = 100 - winnerPercent;
-  } else if (Number.isFinite(commissionPercent) && !Number.isFinite(winnerPercent)) {
-    commissionPercent = Math.min(99, Math.max(1, Math.round(commissionPercent)));
-    winnerPercent = 100 - commissionPercent;
-  } else if (Number.isFinite(winnerPercent) && Number.isFinite(commissionPercent)) {
-    winnerPercent = Math.min(99, Math.max(1, Math.round(winnerPercent)));
-    commissionPercent = 100 - winnerPercent;
-  } else {
-    winnerPercent = base.winnerPercent;
-    commissionPercent = base.commissionPercent;
-  }
-
-  const themeIds: BoardThemeId[] = ['classic', 'kingdoms', 'football', 'future', 'gang', 'egyptian'];
-  const themePrices = { ...base.themePrices };
-  for (const id of themeIds) {
-    const incoming = raw?.themePrices?.[id];
-    if (incoming) {
-      themePrices[id] = {
-        priceKz: Math.max(0, Math.round(Number(incoming.priceKz) || 0)),
-        priceUsdt: Math.max(0, Number((Number(incoming.priceUsdt) || 0).toFixed(2)))
-      };
-    }
-  }
-
-  return { winnerPercent, commissionPercent, themePrices };
+function getRoomEpoch(roomId: string): number {
+  return roomMatchEpoch.get(roomId) || 1;
 }
 
-function loadPlatformConfig(): PlatformConfig {
-  try {
-    if (fs.existsSync(PLATFORM_CONFIG_FILE)) {
-      const text = fs.readFileSync(PLATFORM_CONFIG_FILE, 'utf8');
-      return sanitizePlatformConfig(JSON.parse(text));
-    }
-  } catch {
-    // fallback to defaults
-  }
-  return sanitizePlatformConfig(DEFAULT_PLATFORM_CONFIG);
+function bumpRoomEpoch(roomId: string): number {
+  const next = getRoomEpoch(roomId) + 1;
+  roomMatchEpoch.set(roomId, next);
+  return next;
 }
-
-function savePlatformConfig(config: PlatformConfig) {
-  try {
-    fs.writeFileSync(PLATFORM_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
-  } catch {
-    // ignore disk errors
-  }
-}
-
-let platformConfig: PlatformConfig = loadPlatformConfig();
 
 const BOT_PROFILES = [
   { name: 'Bot Kilamba (IA)', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=BotKilamba&backgroundColor=2563eb' },
@@ -343,6 +295,63 @@ function broadcastRoomTick(roomId: string, turnTimer: number) {
   }
 }
 
+async function pushUserSync(userId: string) {
+  if (!userId || userId.startsWith('bot_')) return;
+  try {
+    const [user, transactions, matchHistory] = await Promise.all([
+      db.getUserById(userId),
+      db.getUserTransactions(userId),
+      db.getUserMatchHistory(userId)
+    ]);
+    if (!user) return;
+    const payload = JSON.stringify({
+      type: 'user:sync',
+      user,
+      transactions,
+      matchHistory
+    });
+    for (const [ws, meta] of clientsMap.entries()) {
+      if (ws.readyState === WebSocket.OPEN && meta.userId === userId) {
+        meta.userName = user.name;
+        meta.userAvatar = user.avatar;
+        meta.userCategory = user.category;
+        ws.send(payload);
+      }
+    }
+  } catch (err) {
+    console.error('[N – WS] Erro em pushUserSync:', err);
+  }
+}
+
+function broadcastAdminRefresh() {
+  const payload = JSON.stringify({ type: 'admin:refresh' });
+  for (const [ws, meta] of clientsMap.entries()) {
+    if (ws.readyState === WebSocket.OPEN && meta.isAdmin) {
+      ws.send(payload);
+    }
+  }
+}
+
+async function settleFinishedRoomIfNeeded(room: Room) {
+  if (room.status !== 'FINISHED' || !room.boardState.winner) return;
+  try {
+    const matchKey = `${room.id}:${getRoomEpoch(room.id)}`;
+    const { affectedUsers, matchEntry } = await db.settleMatchVictory({
+      room,
+      matchKey,
+      winnerColor: room.boardState.winner
+    });
+    for (const u of affectedUsers) {
+      await pushUserSync(u.id);
+    }
+    if (matchEntry) {
+      broadcastAdminRefresh();
+    }
+  } catch (err) {
+    console.error('[N – DB] Erro ao liquidar partida:', err);
+  }
+}
+
 function passTurnToNextPlayer(room: Room, reason: string): Room {
   const eligiblePlayers = room.players.filter((p) => !p.resigned);
   const pool = eligiblePlayers.length > 0 ? eligiblePlayers : room.players;
@@ -525,11 +534,11 @@ function executeMoveOnRoom(room: Room, playerColor: PlayerColor, pieceIndex: num
   return nextRoomState;
 }
 
-function joinClientToRoom(
+async function joinClientToRoom(
   meta: ClientMeta,
   room: Room,
   preferredColor?: PlayerColor
-): { ok: boolean; error?: string; room?: Room } {
+): Promise<{ ok: boolean; error?: string; room?: Room }> {
   // Check if already in room (idempotent reconnection)
   const existingIndex = room.players.findIndex((p) => p.userId === meta.userId);
   if (existingIndex !== -1) {
@@ -552,6 +561,22 @@ function joinClientToRoom(
 
   if (room.status === 'FINISHED') {
     return { ok: false, error: 'Esta partida já terminou.' };
+  }
+
+  // Server-authoritative stake deduction BEFORE seating player
+  if (room.betAmount > 0) {
+    const debit = await db.debitMatchStake({
+      userId: meta.userId,
+      currency: room.currency,
+      amount: room.betAmount,
+      isDemo: Boolean(room.isDemo),
+      roomId: room.id,
+      roomCode: room.code
+    });
+    if (!debit.ok) {
+      return { ok: false, error: debit.error };
+    }
+    await pushUserSync(meta.userId);
   }
 
   const usedColors = new Set(room.players.map((p) => p.color));
@@ -591,6 +616,11 @@ function joinClientToRoom(
   const updatedPlayers = [...room.players, newSlot];
   const shouldAutoStart = updatedPlayers.length >= room.maxPlayers;
 
+  const totalPot = room.betAmount * (shouldAutoStart ? updatedPlayers.length : room.maxPlayers);
+  const wPct = room.winnerPercent ?? platformConfig.winnerPercent;
+  const prizePool = Math.round(totalPot * (wPct / 100));
+  const platformCommission = Math.max(0, totalPot - prizePool);
+
   const systemMsg: ChatMessage = {
     id: `sys_join_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     userId: 'system',
@@ -606,6 +636,8 @@ function joinClientToRoom(
     ...room,
     hostId: updatedHostId,
     players: updatedPlayers,
+    prizePool,
+    platformCommission,
     status: shouldAutoStart ? 'PLAYING' : room.status,
     boardState: {
       ...room.boardState,
@@ -623,7 +655,7 @@ function joinClientToRoom(
   return { ok: true, room: updatedRoom };
 }
 
-function removeClientFromCurrentRoom(meta: ClientMeta) {
+async function removeClientFromCurrentRoom(meta: ClientMeta) {
   if (!meta.roomId) return;
   const room = roomsMap.get(meta.roomId);
   const prevRoomId = meta.roomId;
@@ -633,6 +665,19 @@ function removeClientFromCurrentRoom(meta: ClientMeta) {
 
   const leavingPlayer = room.players.find((p) => p.userId === meta.userId);
   if (!leavingPlayer) return;
+
+  // Refund stake if leaving BEFORE the match started
+  if (room.status === 'WAITING' && room.betAmount > 0 && !leavingPlayer.isBot) {
+    await db.refundMatchStake({
+      userId: leavingPlayer.userId,
+      currency: room.currency,
+      amount: room.betAmount,
+      isDemo: Boolean(room.isDemo),
+      roomId: room.id,
+      roomCode: room.code
+    });
+    await pushUserSync(leavingPlayer.userId);
+  }
 
   const remainingPlayers = room.players.filter((p) => p.userId !== meta.userId);
   const remainingHumans = remainingPlayers.filter((p) => !p.isBot);
@@ -680,6 +725,33 @@ function removeClientFromCurrentRoom(meta: ClientMeta) {
   };
 
   if (room.status === 'PLAYING' && remainingPlayers.length < 2) {
+    if (room.betAmount > 0 && remainingPlayers[0]) {
+      // Paid match abandonment: remaining player wins automatically and receives the pot
+      clearRoomTimers(prevRoomId);
+      const winnerSlot = remainingPlayers[0];
+      updatedRoom = {
+        ...updatedRoom,
+        status: 'FINISHED',
+        players: room.players.map((p) =>
+          p.userId === meta.userId ? { ...p, resigned: true, isConnected: false } : p
+        ),
+        boardState: {
+          ...updatedRoom.boardState,
+          winner: winnerSlot.color,
+          hasRolled: false,
+          isRolling: false,
+          eligiblePieces: [],
+          surrenderOffer: null,
+          lastAction: `🏳️ ${leavingPlayer.name} abandonou a partida! 🏆 ${winnerSlot.name} venceu!`
+        }
+      };
+      roomsMap.set(prevRoomId, updatedRoom);
+      await settleFinishedRoomIfNeeded(updatedRoom);
+      broadcastRoomState(prevRoomId);
+      broadcastRoomsList();
+      return;
+    }
+
     updatedRoom = {
       ...updatedRoom,
       status: 'WAITING',
@@ -847,6 +919,7 @@ function scheduleBotTurnIfNeeded(roomId: string) {
         roomsMap.set(roomId, afterMoveRoom);
         broadcastRoomState(roomId);
         if (afterMoveRoom.status === 'FINISHED') {
+          void settleFinishedRoomIfNeeded(afterMoveRoom);
           broadcastRoomsList();
         } else {
           scheduleBotTurnIfNeeded(roomId);
@@ -862,9 +935,42 @@ function scheduleBotTurnIfNeeded(roomId: string) {
   botTurnTimeouts.set(roomId, rollDelay);
 }
 
+interface AuthedRequest extends Request {
+  session?: SessionClaims;
+}
+
+function getBearerClaims(req: Request): SessionClaims | null {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ')) return null;
+  return verifySessionToken(header.slice(7).trim());
+}
+
+function requireUser(req: AuthedRequest, res: Response, next: NextFunction) {
+  const claims = getBearerClaims(req);
+  if (!claims) {
+    res.status(401).json({ error: 'Sessão expirada ou inválida. Faça login novamente.' });
+    return;
+  }
+  req.session = claims;
+  next();
+}
+
+function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
+  const claims = getBearerClaims(req);
+  if (!claims || !claims.isAdmin) {
+    res.status(403).json({ error: 'Acesso restrito ao Administrador N.' });
+    return;
+  }
+  req.session = claims;
+  next();
+}
+
 async function startServer() {
+  await db.init();
+  platformConfig = await db.getPlatformConfig();
+
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '5mb' }));
 
   app.get('/health', (_req, res) => {
     res.status(200).type('text/plain').send('ok');
@@ -873,13 +979,426 @@ async function startServer() {
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
+      storageMode: db.storageMode,
       onlineUsers: getOnlineCount(),
       roomsCount: roomsMap.size
     });
   });
 
+  // ---------- Auth Endpoints ----------
+  app.post('/api/auth/register', async (req, res) => {
+    try {
+      const { name, phone, email, password } = req.body || {};
+      const result = await db.registerUser({
+        name: String(name || ''),
+        phone: String(phone || ''),
+        email: typeof email === 'string' ? email : '',
+        password: String(password || '')
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+        await Promise.all([
+          db.getUserTransactions(result.user.id),
+          db.getUserMatchHistory(result.user.id),
+          db.getUserSupportTickets(result.user.id),
+          db.getPaymentSettings(),
+          db.getPlatformConfig()
+        ]);
+      res.status(201).json({
+        user: result.user,
+        token: result.token,
+        transactions,
+        matchHistory,
+        supportTickets,
+        paymentSettings,
+        platformConfig: cfg
+      });
+    } catch (err) {
+      console.error('[N – API] register error:', err);
+      res.status(500).json({ error: 'Erro ao criar conta na base de dados.' });
+    }
+  });
+
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { phone, password } = req.body || {};
+      const result = await db.loginUser({
+        phone: String(phone || ''),
+        password: String(password || '')
+      });
+      if (!result.ok) {
+        res.status(401).json({ error: result.error });
+        return;
+      }
+      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+        await Promise.all([
+          db.getUserTransactions(result.user.id),
+          db.getUserMatchHistory(result.user.id),
+          db.getUserSupportTickets(result.user.id),
+          db.getPaymentSettings(),
+          db.getPlatformConfig()
+        ]);
+      res.json({
+        user: result.user,
+        token: result.token,
+        transactions,
+        matchHistory,
+        supportTickets,
+        paymentSettings,
+        platformConfig: cfg
+      });
+    } catch (err) {
+      console.error('[N – API] login error:', err);
+      res.status(500).json({ error: 'Erro ao iniciar sessão.' });
+    }
+  });
+
+  app.post('/api/auth/admin', async (req, res) => {
+    try {
+      const pin = String(req.body?.pin || '');
+      if (!verifyAdminPin(pin)) {
+        res.status(401).json({ error: 'PIN incorreto. Acesso restrito à administração.' });
+        return;
+      }
+      const currentClaims = getBearerClaims(req);
+      let user = currentClaims ? await db.getUserById(currentClaims.userId) : null;
+      if (!user) {
+        user = await db.getUserById('usr_ao_kassoma');
+      }
+      const targetUserId = user?.id || 'admin_n';
+      const adminToken = createSessionToken(targetUserId, true);
+      res.json({
+        token: adminToken,
+        user
+      });
+    } catch (err) {
+      console.error('[N – API] admin auth error:', err);
+      res.status(500).json({ error: 'Erro ao validar PIN administrativo.' });
+    }
+  });
+
+  app.get('/api/me', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const user = await db.getUserById(req.session!.userId);
+      if (!user) {
+        res.status(404).json({ error: 'Utilizador não encontrado.' });
+        return;
+      }
+      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+        await Promise.all([
+          db.getUserTransactions(user.id),
+          db.getUserMatchHistory(user.id),
+          db.getUserSupportTickets(user.id),
+          db.getPaymentSettings(),
+          db.getPlatformConfig()
+        ]);
+      res.json({
+        user,
+        transactions,
+        matchHistory,
+        supportTickets,
+        paymentSettings,
+        platformConfig: cfg
+      });
+    } catch (err) {
+      console.error('[N – API] /api/me error:', err);
+      res.status(500).json({ error: 'Erro ao carregar dados do jogador.' });
+    }
+  });
+
+  app.patch('/api/me', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { name, phone, password, avatar, selectedTheme } = req.body || {};
+      const result = await db.updateUserProfile(req.session!.userId, {
+        name: typeof name === 'string' ? name : undefined,
+        phone: typeof phone === 'string' ? phone : undefined,
+        password: typeof password === 'string' ? password : undefined,
+        avatar: typeof avatar === 'string' ? avatar : undefined,
+        selectedTheme: typeof selectedTheme === 'string' ? (selectedTheme as BoardThemeId) : undefined
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      await pushUserSync(result.user.id);
+      res.json({ user: result.user });
+    } catch (err) {
+      console.error('[N – API] PATCH /api/me error:', err);
+      res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+    }
+  });
+
+  // ---------- Wallet Endpoints (Server-Authoritative) ----------
+  app.post('/api/wallet/deposit', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { type, currency, amount, method, network, reference, proofUrl, themeId, themeName } =
+        req.body || {};
+      const result = await db.createDepositRequest({
+        userId: req.session!.userId,
+        type: type === 'THEME_UNLOCK' ? 'THEME_UNLOCK' : 'DEPOSIT',
+        currency: currency === 'USDT' ? 'USDT' : 'KZ',
+        amount: Number(amount),
+        method: String(method || 'MULTICAIXA_EXPRESS') as PaymentMethod,
+        network: typeof network === 'string' ? network : undefined,
+        reference: typeof reference === 'string' ? reference : undefined,
+        proofUrl: typeof proofUrl === 'string' ? proofUrl : undefined,
+        themeId: typeof themeId === 'string' ? (themeId as BoardThemeId) : undefined,
+        themeName: typeof themeName === 'string' ? themeName : undefined
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      await pushUserSync(req.session!.userId);
+      broadcastAdminRefresh();
+      res.status(201).json({ transaction: result.transaction });
+    } catch (err) {
+      console.error('[N – API] /api/wallet/deposit error:', err);
+      res.status(500).json({ error: 'Erro ao registrar depósito.' });
+    }
+  });
+
+  app.post('/api/wallet/withdraw', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { currency, amount, method, destination, network } = req.body || {};
+      const result = await db.createWithdrawalRequest({
+        userId: req.session!.userId,
+        currency: currency === 'USDT' ? 'USDT' : 'KZ',
+        amount: Number(amount),
+        method: String(method || 'MULTICAIXA_EXPRESS') as PaymentMethod,
+        destination: String(destination || ''),
+        network: typeof network === 'string' ? network : undefined
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      await pushUserSync(req.session!.userId);
+      broadcastAdminRefresh();
+      res.status(201).json({ user: result.user, transaction: result.transaction });
+    } catch (err) {
+      console.error('[N – API] /api/wallet/withdraw error:', err);
+      res.status(500).json({ error: 'Erro ao solicitar levantamento.' });
+    }
+  });
+
+  // ---------- Match History, Ranking, Support & Public Config ----------
+  app.get('/api/match-history', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const matchHistory = await db.getUserMatchHistory(req.session!.userId);
+      res.json({ matchHistory });
+    } catch (err) {
+      console.error('[N – API] /api/match-history error:', err);
+      res.status(500).json({ error: 'Erro ao carregar histórico de partidas.' });
+    }
+  });
+
+  app.get('/api/ranking', async (_req, res) => {
+    try {
+      const ranking = await db.getRankingList();
+      res.json({ ranking });
+    } catch (err) {
+      console.error('[N – API] /api/ranking error:', err);
+      res.status(500).json({ error: 'Erro ao carregar ranking.' });
+    }
+  });
+
+  app.get('/api/payment-settings', async (_req, res) => {
+    try {
+      const settings = await db.getPaymentSettings();
+      res.json({ paymentSettings: settings });
+    } catch (err) {
+      res.status(500).json({ error: 'Erro ao carregar formas de pagamento.' });
+    }
+  });
+
   app.get('/api/platform-config', (_req, res) => {
     res.json({ config: platformConfig });
+  });
+
+  app.post('/api/support/message', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { text, subject } = req.body || {};
+      const ticket = await db.addUserSupportMessage({
+        userId: req.session!.userId,
+        text: String(text || ''),
+        subject: typeof subject === 'string' ? subject : undefined
+      });
+      if (!ticket) {
+        res.status(400).json({ error: 'Mensagem inválida.' });
+        return;
+      }
+      const supportTickets = await db.getUserSupportTickets(req.session!.userId);
+      broadcastAdminRefresh();
+      res.json({ ticket, supportTickets });
+    } catch (err) {
+      console.error('[N – API] /api/support/message error:', err);
+      res.status(500).json({ error: 'Erro ao enviar mensagem de suporte.' });
+    }
+  });
+
+  // ---------- Admin Endpoints ----------
+  app.get('/api/admin/overview', requireAdmin, async (_req, res) => {
+    try {
+      const overview = await db.getAdminOverview();
+      res.json({ overview });
+    } catch (err) {
+      console.error('[N – API] /api/admin/overview error:', err);
+      res.status(500).json({ error: 'Erro ao carregar dados administrativos.' });
+    }
+  });
+
+  app.post('/api/admin/deposits/:txId/approve', requireAdmin, async (req, res) => {
+    try {
+      const result = await db.adminApproveDeposit(String(req.params.txId));
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      if (result.user) await pushUserSync(result.user.id);
+      const overview = await db.getAdminOverview();
+      res.json({ transaction: result.transaction, overview });
+    } catch (err) {
+      console.error('[N – API] approve deposit error:', err);
+      res.status(500).json({ error: 'Erro ao aprovar depósito.' });
+    }
+  });
+
+  app.post('/api/admin/deposits/:txId/reject', requireAdmin, async (req, res) => {
+    try {
+      const result = await db.adminRejectDeposit(String(req.params.txId));
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      await pushUserSync(result.transaction.userId);
+      const overview = await db.getAdminOverview();
+      res.json({ transaction: result.transaction, overview });
+    } catch (err) {
+      console.error('[N – API] reject deposit error:', err);
+      res.status(500).json({ error: 'Erro ao rejeitar depósito.' });
+    }
+  });
+
+  app.post('/api/admin/withdrawals/:txId/approve', requireAdmin, async (req, res) => {
+    try {
+      const result = await db.adminApproveWithdrawal(String(req.params.txId));
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      if (result.user) await pushUserSync(result.user.id);
+      const overview = await db.getAdminOverview();
+      res.json({ transaction: result.transaction, overview });
+    } catch (err) {
+      console.error('[N – API] approve withdrawal error:', err);
+      res.status(500).json({ error: 'Erro ao aprovar levantamento.' });
+    }
+  });
+
+  app.post('/api/admin/withdrawals/:txId/reject', requireAdmin, async (req, res) => {
+    try {
+      const result = await db.adminRejectWithdrawal(String(req.params.txId));
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      if (result.user) await pushUserSync(result.user.id);
+      const overview = await db.getAdminOverview();
+      res.json({ transaction: result.transaction, overview });
+    } catch (err) {
+      console.error('[N – API] reject withdrawal error:', err);
+      res.status(500).json({ error: 'Erro ao rejeitar levantamento.' });
+    }
+  });
+
+  app.post('/api/admin/users/:userId/suspend', requireAdmin, async (req, res) => {
+    try {
+      const user = await db.adminToggleUserSuspension(String(req.params.userId));
+      if (!user) {
+        res.status(404).json({ error: 'Jogador não encontrado.' });
+        return;
+      }
+      await pushUserSync(user.id);
+      const overview = await db.getAdminOverview();
+      res.json({ user, overview });
+    } catch (err) {
+      console.error('[N – API] suspend user error:', err);
+      res.status(500).json({ error: 'Erro ao atualizar suspensão.' });
+    }
+  });
+
+  app.put('/api/admin/payment-settings', requireAdmin, async (req, res) => {
+    try {
+      const updated = await db.savePaymentSettings(req.body || {});
+      const payload = JSON.stringify({ type: 'payment:settings', paymentSettings: updated });
+      for (const clientWs of clientsMap.keys()) {
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(payload);
+      }
+      res.json({ paymentSettings: updated });
+    } catch (err) {
+      console.error('[N – API] payment-settings error:', err);
+      res.status(500).json({ error: 'Erro ao guardar formas de pagamento.' });
+    }
+  });
+
+  app.put('/api/admin/platform-config', requireAdmin, async (req, res) => {
+    try {
+      platformConfig = await db.savePlatformConfig(req.body || {});
+      for (const [rId, rm] of roomsMap.entries()) {
+        if (rm.status === 'WAITING') {
+          const pot = rm.betAmount * rm.maxPlayers;
+          const nextPrize = Math.round(pot * (platformConfig.winnerPercent / 100));
+          const nextComm = Math.max(0, pot - nextPrize);
+          const updatedRm: Room = {
+            ...rm,
+            prizePool: nextPrize,
+            platformCommission: nextComm,
+            winnerPercent: platformConfig.winnerPercent,
+            commissionPercent: platformConfig.commissionPercent
+          };
+          roomsMap.set(rId, updatedRm);
+          broadcastRoomState(rId);
+        }
+      }
+      broadcastRoomsList();
+      const payload = JSON.stringify({ type: 'platform:config', config: platformConfig });
+      for (const clientWs of clientsMap.keys()) {
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(payload);
+      }
+      res.json({ config: platformConfig });
+    } catch (err) {
+      console.error('[N – API] platform-config error:', err);
+      res.status(500).json({ error: 'Erro ao guardar taxas da plataforma.' });
+    }
+  });
+
+  app.post('/api/admin/support/:ticketId/reply', requireAdmin, async (req, res) => {
+    try {
+      const ticket = await db.adminReplySupportTicket(
+        String(req.params.ticketId),
+        String(req.body?.text || '')
+      );
+      if (!ticket) {
+        res.status(404).json({ error: 'Ticket não encontrado.' });
+        return;
+      }
+      const userTickets = await db.getUserSupportTickets(ticket.userId);
+      const syncPayload = JSON.stringify({ type: 'support:sync', supportTickets: userTickets });
+      for (const [clientWs, meta] of clientsMap.entries()) {
+        if (clientWs.readyState === WebSocket.OPEN && meta.userId === ticket.userId) {
+          clientWs.send(syncPayload);
+        }
+      }
+      const overview = await db.getAdminOverview();
+      res.json({ ticket, overview });
+    } catch (err) {
+      console.error('[N – API] support reply error:', err);
+      res.status(500).json({ error: 'Erro ao responder ticket.' });
+    }
   });
 
   app.get('/api/rooms', (req, res) => {
@@ -905,11 +1424,12 @@ async function startServer() {
       userName: 'Jogador',
       userAvatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=KingLudo',
       userCategory: 'Bronze',
+      isAdmin: false,
       roomId: null
     };
     clientsMap.set(ws, meta);
 
-    ws.on('message', (raw) => {
+    ws.on('message', async (raw) => {
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(raw.toString()) as Record<string, unknown>;
@@ -920,31 +1440,51 @@ async function startServer() {
       const type = String(msg.type || '');
 
       if (type === 'auth:hello') {
-        meta.userId = String(msg.userId || `usr_${Date.now()}`);
-        meta.userName = String(msg.userName || 'Jogador');
-        meta.userAvatar = String(msg.userAvatar || meta.userAvatar);
-        meta.userCategory = (msg.userCategory as PlayerCategory) || 'Bronze';
-
-        // Reconnect to room if already seated in one
-        for (const room of roomsMap.values()) {
-          const pIdx = room.players.findIndex((p) => p.userId === meta.userId);
-          if (pIdx !== -1) {
-            room.players[pIdx] = {
-              ...room.players[pIdx],
-              name: meta.userName,
-              avatar: meta.userAvatar,
-              isConnected: true
-            };
-            meta.roomId = room.id;
-            roomsMap.set(room.id, room);
-            sendToClient(ws, { type: 'room:state', room });
-            broadcastRoomState(room.id);
+        const tokenClaims = verifySessionToken(
+          typeof msg.token === 'string' ? msg.token : undefined
+        );
+        const adminClaims = verifySessionToken(
+          typeof msg.adminToken === 'string' ? msg.adminToken : undefined
+        );
+        if (tokenClaims) {
+          const dbUser = await db.getUserById(tokenClaims.userId);
+          if (dbUser) {
+            meta.userId = dbUser.id;
+            meta.userName = dbUser.name;
+            meta.userAvatar = dbUser.avatar;
+            meta.userCategory = dbUser.category;
           }
         }
+        meta.isAdmin = Boolean(tokenClaims?.isAdmin || adminClaims?.isAdmin);
 
+        if (meta.userId) {
+          // Reconnect to room if already seated in one
+          for (const room of roomsMap.values()) {
+            const pIdx = room.players.findIndex((p) => p.userId === meta.userId);
+            if (pIdx !== -1) {
+              room.players[pIdx] = {
+                ...room.players[pIdx],
+                name: meta.userName,
+                avatar: meta.userAvatar,
+                isConnected: true
+              };
+              meta.roomId = room.id;
+              roomsMap.set(room.id, room);
+              sendToClient(ws, { type: 'room:state', room });
+              broadcastRoomState(room.id);
+            }
+          }
+          await pushUserSync(meta.userId);
+        }
+
+        const paySettings = await db.getPaymentSettings();
         sendToClient(ws, {
           type: 'platform:config',
           config: platformConfig
+        });
+        sendToClient(ws, {
+          type: 'payment:settings',
+          paymentSettings: paySettings
         });
         sendToClient(ws, {
           type: 'rooms:list',
@@ -956,16 +1496,12 @@ async function startServer() {
       }
 
       if (type === 'admin:update_platform_config') {
+        if (!meta.isAdmin) {
+          sendToClient(ws, { type: 'error', message: 'Apenas o Administrador pode alterar as taxas.' });
+          return;
+        }
         const incoming = (msg.config || {}) as Partial<PlatformConfig>;
-        platformConfig = sanitizePlatformConfig({
-          winnerPercent: incoming.winnerPercent ?? platformConfig.winnerPercent,
-          commissionPercent: incoming.commissionPercent ?? platformConfig.commissionPercent,
-          themePrices: {
-            ...platformConfig.themePrices,
-            ...(incoming.themePrices || {})
-          }
-        });
-        savePlatformConfig(platformConfig);
+        platformConfig = await db.savePlatformConfig(incoming);
 
         // Update WAITING rooms' prizePool & commission to reflect new admin percentages
         for (const [rId, rm] of roomsMap.entries()) {
@@ -1002,10 +1538,13 @@ async function startServer() {
       }
 
       if (type === 'room:create') {
-        if (!meta.userId) return;
+        if (!meta.userId) {
+          sendToClient(ws, { type: 'error', message: 'Inicie sessão para criar uma mesa.' });
+          return;
+        }
         // Leave previous room first if seated elsewhere
         if (meta.roomId) {
-          removeClientFromCurrentRoom(meta);
+          await removeClientFromCurrentRoom(meta);
         }
 
         const maxPlayers = ([2, 3, 4].includes(Number(msg.maxPlayers)) ? Number(msg.maxPlayers) : 2) as 2 | 3 | 4;
@@ -1013,9 +1552,14 @@ async function startServer() {
         const betAmount = Math.max(0, Number(msg.betAmount) || 0);
         const withBots = Boolean(msg.withBots);
         const isPrivate = withBots ? true : Boolean(msg.isPrivate);
-        const isDemo = Boolean(msg.isDemo);
+        const isDemo = Boolean(msg.isDemo) || betAmount === 0;
         const preferredColor = isValidColor(msg.preferredColor) ? msg.preferredColor : undefined;
-        const boardTheme = (typeof msg.boardTheme === 'string' ? msg.boardTheme : 'classic') as BoardThemeId;
+
+        // Verify unlocked board theme against server DB
+        const dbUser = await db.getUserById(meta.userId);
+        const unlocked = dbUser?.unlockedThemes || ['classic'];
+        const requestedTheme = (typeof msg.boardTheme === 'string' ? msg.boardTheme : 'classic') as BoardThemeId;
+        const boardTheme: BoardThemeId = unlocked.includes(requestedTheme) ? requestedTheme : 'classic';
         const roomName = String(msg.name || '').trim() || (withBots ? 'Duelo contra Bot (IA)' : 'Mesa Privada com Amigos');
 
         const roomId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1035,51 +1579,62 @@ async function startServer() {
         });
 
         roomsMap.set(room.id, room);
-        const joined = joinClientToRoom(meta, room, preferredColor);
-        if (joined.ok && joined.room) {
-          let finalRoom = joined.room;
-          if (withBots) {
-            const hostColor = finalRoom.players[0]?.color || 'red';
-            const usedColors = new Set(finalRoom.players.map((p) => p.color));
-            let openColors: PlayerColor[];
-            if (finalRoom.maxPlayers === 2) {
-              const opp = getOppositeColor(hostColor);
-              openColors = !usedColors.has(opp) ? [opp] : ALL_COLORS.filter((c) => !usedColors.has(c)).slice(0, 1);
-            } else {
-              openColors = ALL_COLORS.filter((c) => !usedColors.has(c)).slice(0, finalRoom.maxPlayers - finalRoom.players.length);
-            }
-            const botSlots = openColors.map((c, idx) => createBotSlot(c, idx));
-            const allPlayers = [...finalRoom.players, ...botSlots];
-            finalRoom = {
-              ...finalRoom,
-              players: allPlayers,
-              status: 'PLAYING',
-              boardState: {
-                ...finalRoom.boardState,
-                currentTurnColor: allPlayers[0].color,
-                turnTimer: TURN_SECONDS,
-                lastAction: `Partida contra Bot (IA) iniciada! É a sua vez, ${allPlayers[0].name}. Role o dado!`
-              },
-              chat: [
-                ...finalRoom.chat,
-                {
-                  id: `sys_bot_${Date.now()}`,
-                  userId: 'system',
-                  userName: 'N – Sistema',
-                  text: `Modo Bot (IA) ativado! ${botSlots.map((b) => b.name).join(', ')} entrou na mesa.`,
-                  timestamp: new Date().toLocaleTimeString('pt-AO', { hour: '2-digit', minute: '2-digit' }),
-                  isSystem: true
-                }
-              ]
-            };
-            roomsMap.set(finalRoom.id, finalRoom);
-          }
-
-          sendToClient(ws, { type: 'room:joined', room: finalRoom });
-          broadcastRoomState(finalRoom.id);
-          broadcastRoomsList();
-          scheduleBotTurnIfNeeded(finalRoom.id);
+        const joined = await joinClientToRoom(meta, room, preferredColor);
+        if (!joined.ok || !joined.room) {
+          roomsMap.delete(room.id);
+          sendToClient(ws, { type: 'error', message: joined.error || 'Não foi possível criar a mesa.' });
+          return;
         }
+
+        let finalRoom = joined.room;
+        if (withBots) {
+          const hostColor = finalRoom.players[0]?.color || 'red';
+          const usedColors = new Set(finalRoom.players.map((p) => p.color));
+          let openColors: PlayerColor[];
+          if (finalRoom.maxPlayers === 2) {
+            const opp = getOppositeColor(hostColor);
+            openColors = !usedColors.has(opp) ? [opp] : ALL_COLORS.filter((c) => !usedColors.has(c)).slice(0, 1);
+          } else {
+            openColors = ALL_COLORS.filter((c) => !usedColors.has(c)).slice(0, finalRoom.maxPlayers - finalRoom.players.length);
+          }
+          const botSlots = openColors.map((c, idx) => createBotSlot(c, idx));
+          const allPlayers = [...finalRoom.players, ...botSlots];
+          const pot = finalRoom.betAmount * allPlayers.length;
+          const wPct = finalRoom.winnerPercent ?? platformConfig.winnerPercent;
+          const prizePool = Math.round(pot * (wPct / 100));
+          const platformCommission = Math.max(0, pot - prizePool);
+
+          finalRoom = {
+            ...finalRoom,
+            players: allPlayers,
+            prizePool,
+            platformCommission,
+            status: 'PLAYING',
+            boardState: {
+              ...finalRoom.boardState,
+              currentTurnColor: allPlayers[0].color,
+              turnTimer: TURN_SECONDS,
+              lastAction: `Partida contra Bot (IA) iniciada! É a sua vez, ${allPlayers[0].name}. Role o dado!`
+            },
+            chat: [
+              ...finalRoom.chat,
+              {
+                id: `sys_bot_${Date.now()}`,
+                userId: 'system',
+                userName: 'N – Sistema',
+                text: `Modo Bot (IA) ativado! ${botSlots.map((b) => b.name).join(', ')} entrou na mesa.`,
+                timestamp: new Date().toLocaleTimeString('pt-AO', { hour: '2-digit', minute: '2-digit' }),
+                isSystem: true
+              }
+            ]
+          };
+          roomsMap.set(finalRoom.id, finalRoom);
+        }
+
+        sendToClient(ws, { type: 'room:joined', room: finalRoom });
+        broadcastRoomState(finalRoom.id);
+        broadcastRoomsList();
+        scheduleBotTurnIfNeeded(finalRoom.id);
         return;
       }
 
@@ -1188,7 +1743,10 @@ async function startServer() {
       }
 
       if (type === 'room:join') {
-        if (!meta.userId) return;
+        if (!meta.userId) {
+          sendToClient(ws, { type: 'error', message: 'Inicie sessão para entrar numa mesa.' });
+          return;
+        }
         const roomId = String(msg.roomId || '');
         const room = roomsMap.get(roomId);
         if (!room) {
@@ -1196,10 +1754,10 @@ async function startServer() {
           return;
         }
         if (meta.roomId && meta.roomId !== roomId) {
-          removeClientFromCurrentRoom(meta);
+          await removeClientFromCurrentRoom(meta);
         }
         const preferredColor = isValidColor(msg.preferredColor) ? msg.preferredColor : undefined;
-        const res = joinClientToRoom(meta, room, preferredColor);
+        const res = await joinClientToRoom(meta, room, preferredColor);
         if (!res.ok || !res.room) {
           sendToClient(ws, { type: 'error', message: res.error || 'Não foi possível entrar na mesa.' });
           return;
@@ -1211,7 +1769,10 @@ async function startServer() {
       }
 
       if (type === 'room:join_by_code') {
-        if (!meta.userId) return;
+        if (!meta.userId) {
+          sendToClient(ws, { type: 'error', message: 'Inicie sessão para entrar na sala.' });
+          return;
+        }
         const rawCode = String(msg.code || '').trim().toUpperCase();
         const found = Array.from(roomsMap.values()).find((r) => r.code.toUpperCase() === rawCode);
         if (!found) {
@@ -1222,10 +1783,10 @@ async function startServer() {
           return;
         }
         if (meta.roomId && meta.roomId !== found.id) {
-          removeClientFromCurrentRoom(meta);
+          await removeClientFromCurrentRoom(meta);
         }
         const preferredColor = isValidColor(msg.preferredColor) ? msg.preferredColor : undefined;
-        const res = joinClientToRoom(meta, found, preferredColor);
+        const res = await joinClientToRoom(meta, found, preferredColor);
         if (!res.ok || !res.room) {
           sendToClient(ws, { type: 'error', message: res.error || 'Não foi possível entrar na sala.' });
           return;
@@ -1237,7 +1798,7 @@ async function startServer() {
       }
 
       if (type === 'room:leave') {
-        removeClientFromCurrentRoom(meta);
+        await removeClientFromCurrentRoom(meta);
         return;
       }
 
@@ -1253,8 +1814,14 @@ async function startServer() {
           sendToClient(ws, { type: 'error', message: 'Precisa de pelo menos 2 jogadores reais na sala para iniciar.' });
           return;
         }
+        const pot = room.betAmount * room.players.length;
+        const wPct = room.winnerPercent ?? platformConfig.winnerPercent;
+        const prizePool = Math.round(pot * (wPct / 100));
+        const platformCommission = Math.max(0, pot - prizePool);
         const updated: Room = {
           ...room,
+          prizePool,
+          platformCommission,
           status: 'PLAYING',
           boardState: {
             ...room.boardState,
@@ -1360,6 +1927,7 @@ async function startServer() {
         roomsMap.set(roomId, nextRoom);
         broadcastRoomState(roomId);
         if (nextRoom.status === 'FINISHED') {
+          await settleFinishedRoomIfNeeded(nextRoom);
           broadcastRoomsList();
         } else {
           scheduleBotTurnIfNeeded(roomId);
@@ -1405,6 +1973,7 @@ async function startServer() {
               }
             };
             roomsMap.set(roomId, finishedRoom);
+            await settleFinishedRoomIfNeeded(finishedRoom);
             broadcastRoomState(roomId);
             broadcastRoomsList();
             return;
@@ -1468,7 +2037,46 @@ async function startServer() {
         if (!room) return;
         if (!room.players.some((p) => p.userId === meta.userId)) return;
 
+        // If restarting a finished paid match, deduct stakes again server-side
+        if (room.status === 'FINISHED' && room.betAmount > 0) {
+          const debitedIds: string[] = [];
+          for (const slot of room.players) {
+            if (slot.isBot) continue;
+            const d = await db.debitMatchStake({
+              userId: slot.userId,
+              currency: room.currency,
+              amount: room.betAmount,
+              isDemo: Boolean(room.isDemo),
+              roomId: room.id,
+              roomCode: room.code
+            });
+            if (!d.ok) {
+              for (const prevId of debitedIds) {
+                await db.refundMatchStake({
+                  userId: prevId,
+                  currency: room.currency,
+                  amount: room.betAmount,
+                  isDemo: Boolean(room.isDemo),
+                  roomId: room.id,
+                  roomCode: room.code
+                });
+                await pushUserSync(prevId);
+              }
+              sendToClient(ws, {
+                type: 'error',
+                message: `Saldo insuficiente de ${slot.name} para reiniciar esta aposta.`
+              });
+              return;
+            }
+            debitedIds.push(slot.userId);
+          }
+          for (const uid of debitedIds) {
+            await pushUserSync(uid);
+          }
+        }
+
         clearRoomTimers(roomId);
+        bumpRoomEpoch(roomId);
 
         const resetPlayers = room.players.map((p) => ({
           ...p,

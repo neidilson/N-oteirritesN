@@ -8,33 +8,47 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
-  const { login } = useGame();
+  const { register, login } = useGame();
   const [isRegister, setIsRegister] = useState(false);
 
   // Form Fields
   const [name, setName] = useState('Kassoma Manuel');
   const [phone, setPhone] = useState('923884102');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('senhasegura');
+  const [password, setPassword] = useState('senhasegura2026');
   const [termsAccepted, setTermsAccepted] = useState(true);
   const [ageVerified, setAgeVerified] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmitForm = (e: React.FormEvent) => {
+  const handleSubmitForm = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMsg(null);
     if (isRegister && (!termsAccepted || !ageVerified)) {
-      alert('É obrigatório ter no mínimo 18 anos e aceitar os termos de uso.');
+      setErrorMsg('É obrigatório ter no mínimo 18 anos e aceitar os termos de uso.');
       return;
     }
 
-    login({
-      name: isRegister ? (name || 'Jogador Angolano') : 'Kassoma Manuel',
-      phone: `+244 ${phone}`,
-      email: email || 'kassoma.manuel@ao.net',
-      isAgeVerified: true,
-      isIdentityVerified: true
-    });
+    setSubmitting(true);
+    const res = isRegister
+      ? await register({
+          name: name.trim() || 'Jogador Angolano',
+          phone: `+244 ${phone.trim()}`,
+          email: email.trim(),
+          password: password.trim()
+        })
+      : await login({
+          phone: `+244 ${phone.trim()}`,
+          password: password.trim()
+        });
+    setSubmitting(false);
+
+    if (!res.ok) {
+      setErrorMsg(res.error || 'Falha ao autenticar.');
+      return;
+    }
     onClose();
   };
 
@@ -58,6 +72,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             Acesso ao Jogo
           </span>
         </div>
+
+        {errorMsg && (
+          <div className="p-3 rounded-xl bg-red-950/80 border border-red-600 text-xs font-bold text-red-300 text-center">
+            {errorMsg}
+          </div>
+        )}
 
         <form onSubmit={handleSubmitForm} className="space-y-4">
           {isRegister && (
@@ -152,9 +172,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
           <button
             type="submit"
-            className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 shadow-lg shadow-red-950 transition-all"
+            disabled={submitting}
+            className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 shadow-lg shadow-red-950 transition-all disabled:opacity-60"
           >
-            {isRegister ? 'CADASTRAR E ENTRAR' : 'ENTRAR NO JOGO'}
+            {submitting
+              ? 'A PROCESSAR...'
+              : isRegister
+              ? 'CADASTRAR E ENTRAR'
+              : 'ENTRAR NO JOGO'}
           </button>
 
           <div className="text-center pt-2 text-xs text-neutral-400">

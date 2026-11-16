@@ -250,3 +250,61 @@ export interface PlatformConfig {
   commissionPercent: number;
   themePrices: Record<BoardThemeId, ThemePriceConfig>;
 }
+
+export interface MatchHistoryPlayer {
+  userId: string;
+  name: string;
+  color: PlayerColor;
+  isBot: boolean;
+  resigned?: boolean;
+}
+
+export interface MatchHistoryEntry {
+  id: string;
+  roomId: string;
+  roomCode: string;
+  roomName: string;
+  winnerUserId: string | null;
+  winnerName: string | null;
+  winnerColor: PlayerColor | null;
+  currency: Currency;
+  betAmount: number;
+  totalPot: number;
+  prizePool: number;
+  platformCommission: number;
+  isDemo: boolean;
+  boardTheme: BoardThemeId;
+  players: MatchHistoryPlayer[];
+  finishedAt: string;
+}
+
+export interface AdminPlayerSummary {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  category: PlayerCategory;
+  kzBalance: number;
+  usdtBalance: number;
+  demoKzBalance: number;
+  matchesPlayed: number;
+  wins: number;
+  losses: number;
+  isSuspended: boolean;
+  createdAt: string;
+}
+
+export interface AdminOverview {
+  storageMode: 'postgres' | 'memory';
+  totalUsers: number;
+  totalMatches: number;
+  totalDepositsKz: number;
+  totalDepositsUsdt: number;
+  totalCommissionKz: number;
+  totalCommissionUsdt: number;
+  players: AdminPlayerSummary[];
+  transactions: Transaction[];
+  supportTickets: SupportTicket[];
+  matchHistory: MatchHistoryEntry[];
+}
+

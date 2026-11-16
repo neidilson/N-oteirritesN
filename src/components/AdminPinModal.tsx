@@ -44,8 +44,8 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ isOpen, onClose })
     setErrorMsg(false);
   };
 
-  const verify = (code: string) => {
-    const success = unlockAdmin(code);
+  const verify = async (code: string) => {
+    const success = await unlockAdmin(code);
     if (success) {
       onClose();
     } else {

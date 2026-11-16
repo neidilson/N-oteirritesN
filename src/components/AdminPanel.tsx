@@ -1,12 +1,10 @@
-import React, { useState } from 'react';
-import { useGame } from '../context/GameContext';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useGame, DEFAULT_PLATFORM_CONFIG } from '../context/GameContext';
 import {
-  Shield,
   Users,
   DollarSign,
   TrendingUp,
   FileText,
-  AlertCircle,
   CheckCircle,
   CheckCircle2,
   XCircle,
@@ -16,7 +14,6 @@ import {
   MessageSquare,
   Search,
   Download,
-  Flame,
   Swords,
   CreditCard,
   Building,
@@ -26,18 +23,20 @@ import {
   ArrowLeft,
   Percent,
   Palette,
-  RotateCcw
+  RotateCcw,
+  RefreshCw,
+  Trophy
 } from 'lucide-react';
 import { Transaction, BoardThemeId, ThemePriceConfig } from '../types';
 import { BOARD_THEME_LIST } from '../utils/boardThemes';
-import { DEFAULT_PLATFORM_CONFIG } from '../context/GameContext';
 
 export const AdminPanel: React.FC = () => {
   const {
-    currentUser,
     rooms,
     transactions,
     supportTickets,
+    adminOverview,
+    refreshAdminOverview,
     adminApproveDeposit,
     adminRejectDeposit,
     adminApproveWithdrawal,
@@ -61,6 +60,9 @@ export const AdminPanel: React.FC = () => {
   const [adminReplyText, setAdminReplyText] = useState('');
   const [activeTicketId, setActiveTicketId] = useState<string>(supportTickets[0]?.id || '');
   const [selectedProofTx, setSelectedProofTx] = useState<Transaction | null>(null);
+  const [busyActionId, setBusyActionId] = useState<string | null>(null);
+  const [adminActionError, setAdminActionError] = useState<string | null>(null);
+  const [isRefreshingOverview, setIsRefreshingOverview] = useState(false);
 
   // Payment configuration form state
   const [mcxEntity, setMcxEntity] = useState(paymentSettings.mcxEntity);
@@ -71,9 +73,10 @@ export const AdminPanel: React.FC = () => {
   const [iban, setIban] = useState(paymentSettings.iban);
   const [usdtAddress, setUsdtAddress] = useState(paymentSettings.usdtAddress);
   const [usdtNetwork, setUsdtNetwork] = useState(paymentSettings.usdtNetwork);
-  const [binancePayId, setBinancePayId] = useState(paymentSettings.binancePayId || '849201948');
-  const [bybitUid, setBybitUid] = useState(paymentSettings.bybitUid || '6291048');
+  const [binancePayId, setBinancePayId] = useState(paymentSettings.binancePayId || '');
+  const [bybitUid, setBybitUid] = useState(paymentSettings.bybitUid || '');
   const [paymentSavedFeedback, setPaymentSavedFeedback] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   // Platform percentages & locked board theme prices draft state
   const [winnerPctDraft, setWinnerPctDraft] = useState<number>(platformConfig.winnerPercent);
@@ -82,102 +85,174 @@ export const AdminPanel: React.FC = () => {
     platformConfig.themePrices
   );
   const [rulesSavedFeedback, setRulesSavedFeedback] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
+    if (isAdminUnlocked) {
+      void refreshAdminOverview();
+    }
+  }, [isAdminUnlocked, refreshAdminOverview]);
+
+  useEffect(() => {
+    setMcxEntity(paymentSettings.mcxEntity);
+    setMcxReference(paymentSettings.mcxReference);
+    setMcxPhone(paymentSettings.mcxPhone);
+    setBankName(paymentSettings.bankName);
+    setAccountHolder(paymentSettings.accountHolder);
+    setIban(paymentSettings.iban);
+    setUsdtAddress(paymentSettings.usdtAddress);
+    setUsdtNetwork(paymentSettings.usdtNetwork);
+    setBinancePayId(paymentSettings.binancePayId || '');
+    setBybitUid(paymentSettings.bybitUid || '');
+  }, [paymentSettings]);
+
+  useEffect(() => {
     setWinnerPctDraft(platformConfig.winnerPercent);
     setCommPctDraft(platformConfig.commissionPercent);
     setThemePricesDraft(platformConfig.themePrices);
   }, [platformConfig]);
 
-  // Financial aggregates
-  const totalKzDeposits = transactions
-    .filter(t => t.type === 'DEPOSIT' && t.currency === 'KZ' && t.status === 'Confirmado')
-    .reduce((acc, t) => acc + t.amount, 48500000);
+  const allPlayers = adminOverview?.players ?? [];
+  const allTransactions = adminOverview?.transactions ?? transactions;
+  const allTickets = adminOverview?.supportTickets ?? supportTickets;
+  const allMatches = adminOverview?.matchHistory ?? [];
 
-  const totalUsdtDeposits = transactions
-    .filter(t => t.type === 'DEPOSIT' && t.currency === 'USDT' && t.status === 'Confirmado')
-    .reduce((acc, t) => acc + t.amount, 72500);
-
-  const pendingDeposits = transactions.filter(
-    t => (t.type === 'DEPOSIT' || t.type === 'THEME_UNLOCK') && t.status === 'Em validação'
-  );
-  const pendingWithdrawals = transactions.filter(t => t.type === 'WITHDRAW' && t.status === 'Pendente');
-
-  // Platform Treasury (Minha Banca) calculations: 25% commission on all game volume
-  const totalPlatformCommissionKz = 12450000;
-  const totalPlatformCommissionUsdt = 18120;
-
-  // Mock player roster for administration
-  const ADMIN_PLAYERS = [
-    {
-      id: currentUser.id,
-      name: currentUser.name,
-      phone: currentUser.phone,
-      email: currentUser.email,
-      category: currentUser.category,
-      kzBalance: currentUser.kzBalance,
-      usdtBalance: currentUser.usdtBalance,
-      matches: currentUser.matchesPlayed,
-      wins: currentUser.wins,
-      isSuspended: currentUser.isSuspended,
-      complaints: 0
-    },
-    {
-      id: 'p_101',
-      name: 'Valdemar Kalunga',
-      phone: '+244 912 345 678',
-      email: 'kalunga.v@gmail.com',
-      category: 'Lenda N',
-      kzBalance: 1450000,
-      usdtBalance: 4200,
-      matches: 260,
-      wins: 214,
-      isSuspended: false,
-      complaints: 1
-    },
-    {
-      id: 'p_102',
-      name: 'Zito Bakita',
-      phone: '+244 931 882 109',
-      email: 'zito.bakita@ao.net',
-      category: 'Platina',
-      kzBalance: 320000,
-      usdtBalance: 120,
-      matches: 140,
-      wins: 89,
-      isSuspended: false,
-      complaints: 0
-    },
-    {
-      id: 'p_103',
-      name: 'António Lixeira (Suspeito)',
-      phone: '+244 944 991 223',
-      email: 'antonio.fake@mail.com',
-      category: 'Bronze',
-      kzBalance: 15000,
-      usdtBalance: 0,
-      matches: 12,
-      wins: 1,
-      isSuspended: true,
-      complaints: 4
+  useEffect(() => {
+    if (allTickets.length > 0 && !allTickets.some(t => t.id === activeTicketId)) {
+      setActiveTicketId(allTickets[0].id);
     }
-  ];
+  }, [allTickets, activeTicketId]);
 
-  const filteredPlayers = ADMIN_PLAYERS.filter(p =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.phone.includes(searchTerm) ||
-    p.email.toLowerCase().includes(searchTerm.toLowerCase())
+  const totalUsers = adminOverview?.totalUsers ?? allPlayers.length;
+  const activeUsersCount = useMemo(
+    () => allPlayers.filter(p => !p.isSuspended).length,
+    [allPlayers]
   );
+  const totalMatches = adminOverview?.totalMatches ?? allMatches.length;
+
+  const totalKzDeposits =
+    adminOverview?.totalDepositsKz ??
+    allTransactions
+      .filter(t => t.type === 'DEPOSIT' && t.currency === 'KZ' && t.status === 'Confirmado')
+      .reduce((acc, t) => acc + t.amount, 0);
+
+  const totalUsdtDeposits =
+    adminOverview?.totalDepositsUsdt ??
+    allTransactions
+      .filter(t => t.type === 'DEPOSIT' && t.currency === 'USDT' && t.status === 'Confirmado')
+      .reduce((acc, t) => acc + t.amount, 0);
+
+  const pendingDeposits = useMemo(
+    () =>
+      allTransactions.filter(
+        t => (t.type === 'DEPOSIT' || t.type === 'THEME_UNLOCK') && t.status === 'Em validação'
+      ),
+    [allTransactions]
+  );
+
+  const pendingWithdrawals = useMemo(
+    () => allTransactions.filter(t => t.type === 'WITHDRAW' && t.status === 'Pendente'),
+    [allTransactions]
+  );
+
+  const totalPlatformCommissionKz =
+    adminOverview?.totalCommissionKz ??
+    allMatches
+      .filter(m => !m.isDemo && m.currency === 'KZ')
+      .reduce((acc, m) => acc + m.platformCommission, 0);
+
+  const totalPlatformCommissionUsdt =
+    adminOverview?.totalCommissionUsdt ??
+    allMatches
+      .filter(m => !m.isDemo && m.currency === 'USDT')
+      .reduce((acc, m) => acc + m.platformCommission, 0);
+
+  const treasuryBreakdown = useMemo(() => {
+    const themeSalesKz = allTransactions
+      .filter(t => t.type === 'THEME_UNLOCK' && t.currency === 'KZ' && t.status === 'Confirmado')
+      .reduce((acc, t) => acc + t.amount, 0);
+    const themeSalesUsdt = allTransactions
+      .filter(t => t.type === 'THEME_UNLOCK' && t.currency === 'USDT' && t.status === 'Confirmado')
+      .reduce((acc, t) => acc + t.amount, 0);
+    const paidWithdrawalsKz = allTransactions
+      .filter(t => t.type === 'WITHDRAW' && t.currency === 'KZ' && (t.status === 'Pago' || t.status === 'Aprovado'))
+      .reduce((acc, t) => acc + t.amount, 0);
+    const paidWithdrawalsUsdt = allTransactions
+      .filter(t => t.type === 'WITHDRAW' && t.currency === 'USDT' && (t.status === 'Pago' || t.status === 'Aprovado'))
+      .reduce((acc, t) => acc + t.amount, 0);
+    const playerReservesKz = allPlayers.reduce((acc, p) => acc + p.kzBalance, 0);
+    const playerReservesUsdt = allPlayers.reduce((acc, p) => acc + p.usdtBalance, 0);
+    return {
+      themeSalesKz,
+      themeSalesUsdt,
+      paidWithdrawalsKz,
+      paidWithdrawalsUsdt,
+      playerReservesKz,
+      playerReservesUsdt
+    };
+  }, [allTransactions, allPlayers]);
+
+  const filteredPlayers = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return allPlayers;
+    return allPlayers.filter(
+      p =>
+        p.name.toLowerCase().includes(q) ||
+        p.phone.toLowerCase().includes(q) ||
+        p.email.toLowerCase().includes(q)
+    );
+  }, [allPlayers, searchTerm]);
 
   const [inlinePin, setInlinePin] = useState('');
   const [inlineError, setInlineError] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
 
-  const selectedTicket = supportTickets.find(t => t.id === activeTicketId) || supportTickets[0];
+  const selectedTicket = allTickets.find(t => t.id === activeTicketId) || allTickets[0];
 
-  const handleAdminReply = (e: React.FormEvent) => {
+  const handleManualRefresh = async () => {
+    setIsRefreshingOverview(true);
+    await refreshAdminOverview();
+    setIsRefreshingOverview(false);
+  };
+
+  const handleExportCsv = () => {
+    const headers = ['ID', 'Jogador', 'Tipo', 'Moeda', 'Valor', 'Taxa', 'Metodo', 'Referencia', 'Estado', 'Data'];
+    const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const rows = allTransactions.map(t => [
+      t.id,
+      t.userName,
+      t.type,
+      t.currency,
+      t.amount,
+      t.fee,
+      t.method,
+      t.reference,
+      t.status,
+      t.createdAt
+    ]);
+    const csvContent = [headers.map(escapeCsv).join(','), ...rows.map(r => r.map(escapeCsv).join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `relatorio-financeiro-n-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleAdminReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminReplyText.trim() || !selectedTicket) return;
-    adminReplySupport(selectedTicket.id, adminReplyText);
+    if (!adminReplyText.trim() || !selectedTicket || busyActionId) return;
+    setAdminActionError(null);
+    setBusyActionId(`reply_${selectedTicket.id}`);
+    const res = await adminReplySupport(selectedTicket.id, adminReplyText);
+    setBusyActionId(null);
+    if (!res.ok) {
+      setAdminActionError(res.error || 'Não foi possível enviar a resposta.');
+      return;
+    }
     setAdminReplyText('');
   };
 
@@ -197,9 +272,12 @@ export const AdminPanel: React.FC = () => {
           </p>
         </div>
 
-        <form onSubmit={(e) => {
+        <form onSubmit={async (e) => {
           e.preventDefault();
-          const ok = unlockAdmin(inlinePin);
+          if (unlocking) return;
+          setUnlocking(true);
+          const ok = await unlockAdmin(inlinePin);
+          setUnlocking(false);
           if (!ok) {
             setInlineError(true);
             setTimeout(() => setInlinePin(''), 800);
@@ -210,11 +288,14 @@ export const AdminPanel: React.FC = () => {
             maxLength={6}
             autoFocus
             value={inlinePin}
-            onChange={(e) => {
-              setInlinePin(e.target.value);
+            onChange={async (e) => {
+              const val = e.target.value;
+              setInlinePin(val);
               setInlineError(false);
-              if (e.target.value.length === 6) {
-                const ok = unlockAdmin(e.target.value);
+              if (val.length === 6 && !unlocking) {
+                setUnlocking(true);
+                const ok = await unlockAdmin(val);
+                setUnlocking(false);
                 if (!ok) {
                   setInlineError(true);
                   setTimeout(() => setInlinePin(''), 800);
@@ -233,9 +314,10 @@ export const AdminPanel: React.FC = () => {
 
           <button
             type="submit"
-            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 shadow-lg shadow-red-950"
+            disabled={unlocking}
+            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs uppercase tracking-wider hover:brightness-110 shadow-lg shadow-red-950 disabled:opacity-60"
           >
-            DESBLOQUEAR ADMIN (PIN)
+            {unlocking ? 'A VERIFICAR PIN...' : 'DESBLOQUEAR ADMIN (PIN)'}
           </button>
 
           <div className="flex items-center justify-between pt-3 border-t border-neutral-800 text-xs">
@@ -278,6 +360,16 @@ export const AdminPanel: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
+          <button
+            onClick={handleManualRefresh}
+            disabled={isRefreshingOverview}
+            className="px-3.5 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow disabled:opacity-60"
+            title="Atualizar dados do servidor"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingOverview ? 'animate-spin' : ''}`} />
+            <span>Atualizar</span>
+          </button>
+
           {/* Sair do Modo Admin */}
           <button
             onClick={lockAdmin}
@@ -300,15 +392,22 @@ export const AdminPanel: React.FC = () => {
         </div>
       </div>
 
+      {adminActionError && (
+        <div className="p-3 rounded-xl bg-red-950/80 border border-red-500/60 text-xs text-red-200 font-bold flex items-center justify-between">
+          <span>{adminActionError}</span>
+          <button onClick={() => setAdminActionError(null)} className="text-red-300 hover:text-white px-2">✕</button>
+        </div>
+      )}
+
       {/* Admin Navigation Tabs */}
       <div className="flex overflow-x-auto gap-2 p-1 bg-neutral-900 border border-neutral-800 rounded-xl text-xs font-bold scrollbar-none">
         {[
           { id: 'kpis', label: 'A. Dashboard Geral', icon: TrendingUp },
-          { id: 'players', label: 'B. Gestão Jogadores', icon: Users },
+          { id: 'players', label: `B. Gestão Jogadores (${totalUsers})`, icon: Users },
           { id: 'finances', label: `C. Validações (${pendingDeposits.length + pendingWithdrawals.length})`, icon: DollarSign },
           { id: 'treasury', label: 'D. Tesouraria (Banca N)', icon: FileText },
-          { id: 'rooms', label: `E. Mesas Ativas (${rooms.length})`, icon: Swords },
-          { id: 'support', label: 'F. Mensagens Suporte', icon: MessageSquare },
+          { id: 'rooms', label: `E. Mesas & Histórico (${rooms.length})`, icon: Swords },
+          { id: 'support', label: `F. Mensagens Suporte (${allTickets.length})`, icon: MessageSquare },
           { id: 'payments', label: 'G. Formas de Pagamento (IBAN/MCX)', icon: CreditCard },
           { id: 'rules', label: 'H. Taxas & Tabuleiros', icon: Percent }
         ].map((tab) => {
@@ -336,30 +435,36 @@ export const AdminPanel: React.FC = () => {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
               <span className="text-neutral-400 text-xs">Total de Utilizadores</span>
-              <span className="text-2xl font-black text-white tabular-nums block mt-1">1.482</span>
-              <span className="text-[10px] text-emerald-400 mt-1 block">312 ativos hoje</span>
+              <span className="text-2xl font-black text-white tabular-nums block mt-1">
+                {totalUsers.toLocaleString('pt-AO')}
+              </span>
+              <span className="text-[10px] text-emerald-400 mt-1 block">
+                {activeUsersCount} contas ativas
+              </span>
             </div>
 
             <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
               <span className="text-neutral-400 text-xs">Partidas Realizadas</span>
-              <span className="text-2xl font-black text-white tabular-nums block mt-1">3.840</span>
-              <span className="text-[10px] text-yellow-400 mt-1 block">{rooms.length} mesas em andamento</span>
-            </div>
-
-            <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-              <span className="text-neutral-400 text-xs">Volume Depósitos KZ</span>
-              <span className="text-2xl font-black text-amber-400 tabular-nums block mt-1">
-                {(totalKzDeposits / 1000000).toFixed(1)}M <span className="text-xs">Kz</span>
+              <span className="text-2xl font-black text-white tabular-nums block mt-1">
+                {totalMatches.toLocaleString('pt-AO')}
               </span>
-              <span className="text-[10px] text-neutral-400 mt-1 block">{transactions.length} transações</span>
+              <span className="text-[10px] text-yellow-400 mt-1 block">{rooms.length} mesas ativas</span>
             </div>
 
             <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-              <span className="text-neutral-400 text-xs">Volume Depósitos USDT</span>
+              <span className="text-neutral-400 text-xs">Depósitos Confirmados KZ</span>
+              <span className="text-2xl font-black text-amber-400 tabular-nums block mt-1">
+                {totalKzDeposits.toLocaleString('pt-AO')} <span className="text-xs">Kz</span>
+              </span>
+              <span className="text-[10px] text-neutral-400 mt-1 block">{allTransactions.length} registos totais</span>
+            </div>
+
+            <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
+              <span className="text-neutral-400 text-xs">Depósitos Confirmados USDT</span>
               <span className="text-2xl font-black text-emerald-400 tabular-nums block mt-1">
                 {totalUsdtDeposits.toLocaleString('pt-AO')} <span className="text-xs">USDT</span>
               </span>
-              <span className="text-[10px] text-emerald-400 mt-1 block">TRC20 & Bybit</span>
+              <span className="text-[10px] text-emerald-400 mt-1 block">TRC20 / Binance / Bybit</span>
             </div>
           </div>
 
@@ -375,7 +480,7 @@ export const AdminPanel: React.FC = () => {
                 + {totalPlatformCommissionUsdt.toLocaleString('pt-AO')} USDT
               </div>
               <span className="text-[11px] text-neutral-400 block pt-1 border-t border-neutral-800">
-                Receita líquida retida pela casa em partidas finalizadas.
+                Receita líquida retida pela casa em partidas reais finalizadas.
               </span>
             </div>
 
@@ -393,13 +498,16 @@ export const AdminPanel: React.FC = () => {
 
             <div className="p-5 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-2">
               <span className="text-xs text-neutral-400 font-bold uppercase tracking-wider">
-                Status de Integridade e Regras
+                Reservas dos Jogadores (Carteiras)
               </span>
-              <div className="text-base font-bold text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle className="w-5 h-5" /> 100% Sincronizado
+              <div className="text-xl font-black text-white tabular-nums">
+                {treasuryBreakdown.playerReservesKz.toLocaleString('pt-AO')} Kz
+              </div>
+              <div className="text-sm font-bold text-emerald-400 tabular-nums">
+                + {treasuryBreakdown.playerReservesUsdt.toLocaleString('pt-AO')} USDT
               </div>
               <span className="text-[11px] text-neutral-400 block pt-1 border-t border-neutral-800">
-                Nenhuma anomalia de dados ou invasão de regras detectada nas salas.
+                Soma dos saldos reais sob custódia do servidor.
               </span>
             </div>
           </div>
@@ -410,7 +518,7 @@ export const AdminPanel: React.FC = () => {
       {adminTab === 'players' && (
         <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-            <h3 className="text-base font-bold text-white">Base de Jogadores Cadastrados</h3>
+            <h3 className="text-base font-bold text-white">Base de Jogadores Cadastrados ({allPlayers.length})</h3>
             <div className="relative w-full sm:w-64">
               <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-2.5" />
               <input
@@ -433,55 +541,72 @@ export const AdminPanel: React.FC = () => {
                   <th className="p-3">Saldo KZ</th>
                   <th className="p-3">Saldo USDT</th>
                   <th className="p-3">Partidas / Vitórias</th>
-                  <th className="p-3">Denúncias</th>
+                  <th className="p-3">Estado</th>
                   <th className="p-3">Ação</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-800/80">
-                {filteredPlayers.map((player) => (
-                  <tr key={player.id} className="hover:bg-neutral-800/40">
-                    <td className="p-3">
-                      <div>
-                        <span className="font-bold text-white block">{player.name}</span>
-                        <span className="text-[10px] text-neutral-400">{player.email}</span>
-                      </div>
-                    </td>
-                    <td className="p-3 font-mono text-neutral-300">{player.phone}</td>
-                    <td className="p-3 font-semibold text-yellow-400">{player.category}</td>
-                    <td className="p-3 tabular-nums font-bold text-white">{player.kzBalance.toLocaleString('pt-AO')} Kz</td>
-                    <td className="p-3 tabular-nums font-bold text-emerald-400">{player.usdtBalance} USDT</td>
-                    <td className="p-3 text-neutral-300">{player.matches} / {player.wins}</td>
-                    <td className="p-3">
-                      {player.complaints > 0 ? (
-                        <span className="text-red-400 font-bold bg-red-950/80 px-2 py-0.5 rounded text-[10px]">
-                          {player.complaints} alerta(s)
-                        </span>
-                      ) : (
-                        <span className="text-emerald-400 text-[10px]">0</span>
-                      )}
-                    </td>
-                    <td className="p-3">
-                      <button
-                        onClick={() => adminToggleUserSuspension(player.id)}
-                        className={`px-3 py-1 rounded text-[11px] font-bold flex items-center gap-1 ${
-                          player.isSuspended
-                            ? 'bg-emerald-700 text-white hover:bg-emerald-600'
-                            : 'bg-red-700 text-white hover:bg-red-600'
-                        }`}
-                      >
-                        {player.isSuspended ? (
-                          <>
-                            <Unlock className="w-3 h-3" /> Reativar
-                          </>
-                        ) : (
-                          <>
-                            <Lock className="w-3 h-3" /> Suspender
-                          </>
-                        )}
-                      </button>
+                {filteredPlayers.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="p-6 text-center text-neutral-500">
+                      Nenhum jogador encontrado.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredPlayers.map((player) => (
+                    <tr key={player.id} className="hover:bg-neutral-800/40">
+                      <td className="p-3">
+                        <div>
+                          <span className="font-bold text-white block">{player.name}</span>
+                          <span className="text-[10px] text-neutral-400">{player.email || 'Sem e-mail'}</span>
+                        </div>
+                      </td>
+                      <td className="p-3 font-mono text-neutral-300">{player.phone}</td>
+                      <td className="p-3 font-semibold text-yellow-400">{player.category}</td>
+                      <td className="p-3 tabular-nums font-bold text-white">{player.kzBalance.toLocaleString('pt-AO')} Kz</td>
+                      <td className="p-3 tabular-nums font-bold text-emerald-400">{player.usdtBalance} USDT</td>
+                      <td className="p-3 text-neutral-300">{player.matchesPlayed} / {player.wins}</td>
+                      <td className="p-3">
+                        {player.isSuspended ? (
+                          <span className="text-red-400 font-bold bg-red-950/80 px-2 py-0.5 rounded text-[10px]">
+                            Suspenso
+                          </span>
+                        ) : (
+                          <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded text-[10px]">
+                            Ativo
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        <button
+                          disabled={busyActionId === `suspend_${player.id}`}
+                          onClick={async () => {
+                            setAdminActionError(null);
+                            setBusyActionId(`suspend_${player.id}`);
+                            const res = await adminToggleUserSuspension(player.id);
+                            setBusyActionId(null);
+                            if (!res.ok) setAdminActionError(res.error || 'Erro ao atualizar estado do jogador.');
+                          }}
+                          className={`px-3 py-1 rounded text-[11px] font-bold flex items-center gap-1 disabled:opacity-50 ${
+                            player.isSuspended
+                              ? 'bg-emerald-700 text-white hover:bg-emerald-600'
+                              : 'bg-red-700 text-white hover:bg-red-600'
+                          }`}
+                        >
+                          {player.isSuspended ? (
+                            <>
+                              <Unlock className="w-3 h-3" /> Reativar
+                            </>
+                          ) : (
+                            <>
+                              <Lock className="w-3 h-3" /> Suspender
+                            </>
+                          )}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -499,11 +624,11 @@ export const AdminPanel: React.FC = () => {
                 <p className="text-xs text-neutral-400">Verifique a autenticidade do comprovativo e aprove o crédito ou o desbloqueio de tabuleiro premium.</p>
               </div>
               <button
-                onClick={() => alert('Relatório financeiro exportado com sucesso (CSV / PDF)!')}
+                onClick={handleExportCsv}
                 className="text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 font-bold"
               >
                 <Download className="w-3.5 h-3.5" />
-                Exportar Relatório
+                Exportar Relatório (CSV)
               </button>
             </div>
 
@@ -513,6 +638,7 @@ export const AdminPanel: React.FC = () => {
               <div className="space-y-3">
                 {pendingDeposits.map((tx) => {
                   const isThemeUnlock = tx.type === 'THEME_UNLOCK';
+                  const busy = busyActionId === tx.id;
                   return (
                     <div key={tx.id} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
                       <div>
@@ -547,15 +673,29 @@ export const AdminPanel: React.FC = () => {
                           </button>
                         )}
                         <button
-                          onClick={() => adminApproveDeposit(tx.id)}
-                          className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-500 flex items-center gap-1 shadow"
+                          disabled={busy}
+                          onClick={async () => {
+                            setAdminActionError(null);
+                            setBusyActionId(tx.id);
+                            const res = await adminApproveDeposit(tx.id);
+                            setBusyActionId(null);
+                            if (!res.ok) setAdminActionError(res.error || 'Erro ao aprovar operação.');
+                          }}
+                          className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-500 flex items-center gap-1 shadow disabled:opacity-50"
                         >
                           <CheckCircle className="w-3.5 h-3.5" />
                           {isThemeUnlock ? 'Confirmar & Desbloquear' : 'Aprovar'}
                         </button>
                         <button
-                          onClick={() => adminRejectDeposit(tx.id)}
-                          className="px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-bold hover:bg-red-600 flex items-center gap-1"
+                          disabled={busy}
+                          onClick={async () => {
+                            setAdminActionError(null);
+                            setBusyActionId(tx.id);
+                            const res = await adminRejectDeposit(tx.id);
+                            setBusyActionId(null);
+                            if (!res.ok) setAdminActionError(res.error || 'Erro ao rejeitar operação.');
+                          }}
+                          className="px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-bold hover:bg-red-600 flex items-center gap-1 disabled:opacity-50"
                         >
                           <XCircle className="w-3.5 h-3.5" />
                           Rejeitar
@@ -575,40 +715,57 @@ export const AdminPanel: React.FC = () => {
               <p className="text-xs text-neutral-500 py-4 text-center">Nenhum levantamento pendente de processamento.</p>
             ) : (
               <div className="space-y-3">
-                {pendingWithdrawals.map((tx) => (
-                  <div key={tx.id} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-sm">{tx.userName}</span>
-                        <span className="text-[10px] bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded font-mono">
-                          {tx.reference}
-                        </span>
+                {pendingWithdrawals.map((tx) => {
+                  const busy = busyActionId === tx.id;
+                  return (
+                    <div key={tx.id} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white text-sm">{tx.userName}</span>
+                          <span className="text-[10px] bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded font-mono">
+                            {tx.reference}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-neutral-400 mt-1">
+                          <span>Valor: <b className="text-red-400">{tx.amount.toLocaleString('pt-AO')} {tx.currency}</b></span>
+                          <span>·</span>
+                          <span className="text-white">{tx.notes}</span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-neutral-400 mt-1">
-                        <span>Valor: <b className="text-red-400">{tx.amount.toLocaleString('pt-AO')} {tx.currency}</b></span>
-                        <span>·</span>
-                        <span className="text-white">{tx.notes}</span>
-                      </div>
-                    </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => adminApproveWithdrawal(tx.id)}
-                        className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-500 flex items-center gap-1"
-                      >
-                        <CheckCircle className="w-3.5 h-3.5" />
-                        Confirmar Pagamento
-                      </button>
-                      <button
-                        onClick={() => adminRejectWithdrawal(tx.id)}
-                        className="px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-bold hover:bg-red-600 flex items-center gap-1"
-                      >
-                        <XCircle className="w-3.5 h-3.5" />
-                        Rejeitar
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          disabled={busy}
+                          onClick={async () => {
+                            setAdminActionError(null);
+                            setBusyActionId(tx.id);
+                            const res = await adminApproveWithdrawal(tx.id);
+                            setBusyActionId(null);
+                            if (!res.ok) setAdminActionError(res.error || 'Erro ao aprovar levantamento.');
+                          }}
+                          className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-500 flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          Confirmar Pagamento
+                        </button>
+                        <button
+                          disabled={busy}
+                          onClick={async () => {
+                            setAdminActionError(null);
+                            setBusyActionId(tx.id);
+                            const res = await adminRejectWithdrawal(tx.id);
+                            setBusyActionId(null);
+                            if (!res.ok) setAdminActionError(res.error || 'Erro ao rejeitar levantamento.');
+                          }}
+                          className="px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-bold hover:bg-red-600 flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          Rejeitar (Estornar)
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -623,7 +780,7 @@ export const AdminPanel: React.FC = () => {
               <span className="text-xs font-bold text-red-500 uppercase tracking-widest block">Área Exclusiva do Proprietário</span>
               <h2 className="text-xl font-black text-white mt-0.5">Tesouraria N – Minha Banca</h2>
               <p className="text-xs text-neutral-400">
-                Segregação estrita entre receitas da plataforma e reservas dos jogadores.
+                Segregação estrita entre receitas da plataforma (comissões e vendas de arenas) e reservas dos jogadores.
               </p>
             </div>
 
@@ -633,20 +790,24 @@ export const AdminPanel: React.FC = () => {
                   Banca Nacional · Kwanza (KZ)
                 </span>
                 <div className="text-3xl font-black text-white tabular-nums">
-                  {totalPlatformCommissionKz.toLocaleString('pt-AO')} Kz
+                  {(totalPlatformCommissionKz + treasuryBreakdown.themeSalesKz).toLocaleString('pt-AO')} Kz
                 </div>
-                <div className="text-xs text-neutral-400 space-y-1 pt-2 border-t border-neutral-800">
+                <div className="text-xs text-neutral-400 space-y-1.5 pt-2 border-t border-neutral-800">
                   <div className="flex justify-between">
-                    <span>Ganhos Diários:</span>
-                    <span className="text-white font-bold">1.250.000 Kz</span>
+                    <span>Comissões em Partidas:</span>
+                    <span className="text-white font-bold">{totalPlatformCommissionKz.toLocaleString('pt-AO')} Kz</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Ganhos Semanais:</span>
-                    <span className="text-white font-bold">4.800.000 Kz</span>
+                    <span>Desbloqueio de Tabuleiros:</span>
+                    <span className="text-white font-bold">{treasuryBreakdown.themeSalesKz.toLocaleString('pt-AO')} Kz</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Ganhos Mensais:</span>
-                    <span className="text-white font-bold">12.450.000 Kz</span>
+                    <span>Total Depositado (Confirmado):</span>
+                    <span className="text-emerald-400 font-bold">{totalKzDeposits.toLocaleString('pt-AO')} Kz</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Total Levantado (Pago):</span>
+                    <span className="text-red-400 font-bold">{treasuryBreakdown.paidWithdrawalsKz.toLocaleString('pt-AO')} Kz</span>
                   </div>
                 </div>
               </div>
@@ -656,20 +817,24 @@ export const AdminPanel: React.FC = () => {
                   Banca Internacional · Tether (USDT)
                 </span>
                 <div className="text-3xl font-black text-emerald-300 tabular-nums">
-                  {totalPlatformCommissionUsdt.toLocaleString('pt-AO')} USDT
+                  {(totalPlatformCommissionUsdt + treasuryBreakdown.themeSalesUsdt).toLocaleString('pt-AO')} USDT
                 </div>
-                <div className="text-xs text-neutral-400 space-y-1 pt-2 border-t border-neutral-800">
+                <div className="text-xs text-neutral-400 space-y-1.5 pt-2 border-t border-neutral-800">
                   <div className="flex justify-between">
-                    <span>Ganhos Diários:</span>
-                    <span className="text-white font-bold">1.840 USDT</span>
+                    <span>Comissões em Partidas:</span>
+                    <span className="text-white font-bold">{totalPlatformCommissionUsdt.toLocaleString('pt-AO')} USDT</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Ganhos Semanais:</span>
-                    <span className="text-white font-bold">6.950 USDT</span>
+                    <span>Desbloqueio de Tabuleiros:</span>
+                    <span className="text-white font-bold">{treasuryBreakdown.themeSalesUsdt.toLocaleString('pt-AO')} USDT</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Ganhos Mensais:</span>
-                    <span className="text-white font-bold">18.120 USDT</span>
+                    <span>Total Depositado (Confirmado):</span>
+                    <span className="text-emerald-400 font-bold">{totalUsdtDeposits.toLocaleString('pt-AO')} USDT</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Total Levantado (Pago):</span>
+                    <span className="text-red-400 font-bold">{treasuryBreakdown.paidWithdrawalsUsdt.toLocaleString('pt-AO')} USDT</span>
                   </div>
                 </div>
               </div>
@@ -678,38 +843,100 @@ export const AdminPanel: React.FC = () => {
         </div>
       )}
 
-      {/* E. CONTROLO DE PARTIDAS */}
+      {/* E. CONTROLO DE PARTIDAS & HISTÓRICO */}
       {adminTab === 'rooms' && (
-        <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
-          <h3 className="text-base font-bold text-white">Monitorização de Salas em Andamento</h3>
+        <div className="space-y-6">
+          <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
+            <h3 className="text-base font-bold text-white">Monitorização de Salas em Andamento ({rooms.length})</h3>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {rooms.map((room) => (
-              <div key={room.id} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 flex items-center justify-between">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-white">{room.name}</span>
-                    <span className="text-[10px] font-mono text-yellow-400 bg-neutral-800 px-1.5 py-0.5 rounded">
-                      {room.code}
-                    </span>
-                  </div>
-                  <div className="text-xs text-neutral-400 mt-1">
-                    <span>{room.players.length}/{room.maxPlayers} Jogadores</span>
-                    <span> · </span>
-                    <span className="text-emerald-400">{room.prizePool.toLocaleString('pt-AO')} {room.currency}</span>
-                    <span> · </span>
-                    <span className="text-yellow-400">Vez de: {room.boardState.currentTurnColor}</span>
-                  </div>
-                </div>
+            {rooms.length === 0 ? (
+              <p className="text-xs text-neutral-500 py-4 text-center">Nenhuma sala ativa neste momento.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {rooms.map((room) => (
+                  <div key={room.id} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-white">{room.name}</span>
+                        <span className="text-[10px] font-mono text-yellow-400 bg-neutral-800 px-1.5 py-0.5 rounded">
+                          {room.code}
+                        </span>
+                        {room.isDemo && (
+                          <span className="text-[10px] font-bold bg-sky-950 text-sky-300 px-1.5 py-0.5 rounded">
+                            DEMO
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-neutral-400 mt-1">
+                        <span>{room.players.length}/{room.maxPlayers} Jogadores</span>
+                        <span> · </span>
+                        <span className="text-emerald-400">{room.prizePool.toLocaleString('pt-AO')} {room.currency}</span>
+                        <span> · </span>
+                        <span className="text-yellow-400">Vez de: {room.boardState.currentTurnColor}</span>
+                      </div>
+                    </div>
 
-                <button
-                  onClick={() => joinRoom(room.id)}
-                  className="px-3 py-1.5 bg-neutral-800 text-white rounded-lg text-xs font-bold hover:bg-neutral-700"
-                >
-                  Inspecionar Mesa
-                </button>
+                    <button
+                      onClick={() => joinRoom(room.id)}
+                      className="px-3 py-1.5 bg-neutral-800 text-white rounded-lg text-xs font-bold hover:bg-neutral-700"
+                    >
+                      Inspecionar Mesa
+                    </button>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
+          </div>
+
+          <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Trophy className="w-4 h-4 text-yellow-400" />
+                Histórico de Partidas Guardadas ({allMatches.length})
+              </h3>
+            </div>
+
+            {allMatches.length === 0 ? (
+              <p className="text-xs text-neutral-500 py-4 text-center">Ainda não existem partidas finalizadas registadas.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-neutral-950 text-neutral-400 border-b border-neutral-800 uppercase text-[10px]">
+                    <tr>
+                      <th className="p-3">Sala</th>
+                      <th className="p-3">Vencedor</th>
+                      <th className="p-3">Modo</th>
+                      <th className="p-3">Prémio</th>
+                      <th className="p-3">Comissão Banca</th>
+                      <th className="p-3">Data</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800">
+                    {allMatches.map((m) => (
+                      <tr key={m.id} className="hover:bg-neutral-800/40">
+                        <td className="p-3">
+                          <span className="font-bold text-white block">{m.roomName}</span>
+                          <span className="text-[10px] font-mono text-neutral-400">{m.roomCode} · {m.players.length} jog.</span>
+                        </td>
+                        <td className="p-3 font-bold text-emerald-400">{m.winnerName || '—'}</td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${m.isDemo ? 'bg-sky-950 text-sky-300' : 'bg-amber-950 text-amber-300'}`}>
+                            {m.isDemo ? 'Treino' : 'Real'}
+                          </span>
+                        </td>
+                        <td className="p-3 tabular-nums font-bold text-white">
+                          {m.prizePool.toLocaleString('pt-AO')} {m.currency}
+                        </td>
+                        <td className="p-3 tabular-nums font-bold text-yellow-400">
+                          {m.isDemo ? '0' : m.platformCommission.toLocaleString('pt-AO')} {m.currency}
+                        </td>
+                        <td className="p-3 text-neutral-400">{m.finishedAt}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -720,25 +947,29 @@ export const AdminPanel: React.FC = () => {
           {/* Ticket List */}
           <div className="md:col-span-4 border-r border-neutral-800 bg-neutral-950 p-3 space-y-2 overflow-y-auto">
             <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider block px-1">
-              Tickets Abertos ({supportTickets.length})
+              Tickets Abertos ({allTickets.length})
             </span>
-            {supportTickets.map((t) => (
-              <div
-                key={t.id}
-                onClick={() => setActiveTicketId(t.id)}
-                className={`p-3 rounded-xl cursor-pointer border transition-colors ${
-                  t.id === selectedTicket?.id
-                    ? 'bg-neutral-900 border-red-500'
-                    : 'bg-neutral-900/40 border-neutral-800 hover:border-neutral-700'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white text-xs">{t.userName}</span>
-                  <span className="text-[10px] text-neutral-500">{t.userPhone}</span>
+            {allTickets.length === 0 ? (
+              <p className="text-xs text-neutral-500 p-3 text-center">Sem tickets de suporte.</p>
+            ) : (
+              allTickets.map((t) => (
+                <div
+                  key={t.id}
+                  onClick={() => setActiveTicketId(t.id)}
+                  className={`p-3 rounded-xl cursor-pointer border transition-colors ${
+                    t.id === selectedTicket?.id
+                      ? 'bg-neutral-900 border-red-500'
+                      : 'bg-neutral-900/40 border-neutral-800 hover:border-neutral-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-white text-xs">{t.userName}</span>
+                    <span className="text-[10px] text-neutral-500">{t.userPhone}</span>
+                  </div>
+                  <p className="text-[11px] text-neutral-400 truncate mt-1">{t.subject}</p>
                 </div>
-                <p className="text-[11px] text-neutral-400 truncate mt-1">{t.subject}</p>
-              </div>
-            ))}
+              ))
+            )}
           </div>
 
           {/* Chat Window */}
@@ -776,7 +1007,8 @@ export const AdminPanel: React.FC = () => {
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-red-600 text-white font-bold text-xs rounded-xl hover:bg-red-500"
+                    disabled={busyActionId === `reply_${selectedTicket.id}`}
+                    className="px-4 py-2 bg-red-600 text-white font-bold text-xs rounded-xl hover:bg-red-500 disabled:opacity-50"
                   >
                     Responder
                   </button>
@@ -810,8 +1042,9 @@ export const AdminPanel: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => {
-                  updatePaymentSettings({
+                onClick={async () => {
+                  setPaymentError(null);
+                  const res = await updatePaymentSettings({
                     mcxEntity,
                     mcxReference,
                     mcxPhone,
@@ -823,6 +1056,10 @@ export const AdminPanel: React.FC = () => {
                     binancePayId,
                     bybitUid
                   });
+                  if (!res.ok) {
+                    setPaymentError(res.error || 'Erro ao guardar formas de pagamento.');
+                    return;
+                  }
                   setPaymentSavedFeedback(true);
                   setTimeout(() => setPaymentSavedFeedback(false), 4000);
                 }}
@@ -832,6 +1069,12 @@ export const AdminPanel: React.FC = () => {
                 <span>Salvar Alterações</span>
               </button>
             </div>
+
+            {paymentError && (
+              <div className="p-3 rounded-xl bg-red-950/80 border border-red-500 text-red-200 text-xs font-bold">
+                {paymentError}
+              </div>
+            )}
 
             {/* Success Feedback Alert */}
             {paymentSavedFeedback && (
@@ -845,9 +1088,10 @@ export const AdminPanel: React.FC = () => {
             )}
 
             <form
-              onSubmit={(e) => {
+              onSubmit={async (e) => {
                 e.preventDefault();
-                updatePaymentSettings({
+                setPaymentError(null);
+                const res = await updatePaymentSettings({
                   mcxEntity,
                   mcxReference,
                   mcxPhone,
@@ -859,6 +1103,10 @@ export const AdminPanel: React.FC = () => {
                   binancePayId,
                   bybitUid
                 });
+                if (!res.ok) {
+                  setPaymentError(res.error || 'Erro ao guardar formas de pagamento.');
+                  return;
+                }
                 setPaymentSavedFeedback(true);
                 setTimeout(() => setPaymentSavedFeedback(false), 4000);
               }}
@@ -1100,13 +1348,18 @@ export const AdminPanel: React.FC = () => {
       {adminTab === 'rules' && (
         <div className="space-y-6">
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
-              updatePlatformConfig({
+              setRulesError(null);
+              const res = await updatePlatformConfig({
                 winnerPercent: winnerPctDraft,
                 commissionPercent: commPctDraft,
                 themePrices: themePricesDraft
               });
+              if (!res.ok) {
+                setRulesError(res.error || 'Erro ao guardar configurações.');
+                return;
+              }
               setRulesSavedFeedback(true);
               setTimeout(() => setRulesSavedFeedback(false), 4000);
             }}
@@ -1133,6 +1386,12 @@ export const AdminPanel: React.FC = () => {
                 <span>Guardar Taxas & Preços</span>
               </button>
             </div>
+
+            {rulesError && (
+              <div className="p-3 rounded-xl bg-red-950/80 border border-red-500 text-red-200 text-xs font-bold">
+                {rulesError}
+              </div>
+            )}
 
             {rulesSavedFeedback && (
               <div className="p-4 rounded-xl bg-emerald-950/80 border border-emerald-500 text-emerald-200 text-xs flex items-center gap-3">
@@ -1417,8 +1676,12 @@ export const AdminPanel: React.FC = () => {
 
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  adminApproveDeposit(selectedProofTx.id);
+                onClick={async () => {
+                  const res = await adminApproveDeposit(selectedProofTx.id);
+                  if (!res.ok) {
+                    setAdminActionError(res.error || 'Erro ao aprovar comprovativo.');
+                    return;
+                  }
                   setSelectedProofTx(null);
                 }}
                 className="flex-1 py-2.5 bg-emerald-600 text-white font-bold text-xs rounded-xl hover:bg-emerald-500"

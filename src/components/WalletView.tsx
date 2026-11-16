@@ -13,13 +13,15 @@ import {
   Building,
   Smartphone,
   ExternalLink,
-  Upload
+  Upload,
+  Trophy
 } from 'lucide-react';
 
 export const WalletView: React.FC = () => {
   const {
     currentUser,
     transactions,
+    matchHistory,
     exchangeRate,
     requestDeposit,
     requestWithdrawal,
@@ -27,7 +29,7 @@ export const WalletView: React.FC = () => {
     platformConfig
   } = useGame();
 
-  const [walletTab, setWalletTab] = useState<'overview' | 'deposit' | 'withdraw' | 'history'>('overview');
+  const [walletTab, setWalletTab] = useState<'overview' | 'deposit' | 'withdraw' | 'history' | 'matches'>('overview');
   const [selectedCurrency, setSelectedCurrency] = useState<Currency>('KZ');
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('MULTICAIXA_EXPRESS');
 
@@ -35,13 +37,18 @@ export const WalletView: React.FC = () => {
   const [depositAmount, setDepositAmount] = useState<number>(5000);
   const [depositNetwork, setDepositNetwork] = useState<'TRC20' | 'ERC20' | 'BEP20'>('TRC20');
   const [depositRefInput, setDepositRefInput] = useState('');
+  const [depositProofUrl, setDepositProofUrl] = useState('');
   const [depositSuccessMsg, setDepositSuccessMsg] = useState(false);
+  const [depositErrorMsg, setDepositErrorMsg] = useState<string | null>(null);
+  const [submittingDeposit, setSubmittingDeposit] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
   // Withdraw Form State
   const [withdrawAmount, setWithdrawAmount] = useState<number>(5000);
   const [withdrawDestination, setWithdrawDestination] = useState('');
   const [withdrawSuccessMsg, setWithdrawSuccessMsg] = useState(false);
+  const [withdrawErrorMsg, setWithdrawErrorMsg] = useState<string | null>(null);
+  const [submittingWithdraw, setSubmittingWithdraw] = useState(false);
 
   // Preset chips for Kwanza
   const KZ_PRESETS = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000];
@@ -54,41 +61,80 @@ export const WalletView: React.FC = () => {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleDepositSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (depositAmount <= 0) return;
+  const handleDepositProofUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setDepositProofUrl(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
-    requestDeposit({
+  const handleDepositSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDepositErrorMsg(null);
+    if (depositAmount <= 0) {
+      setDepositErrorMsg('O valor do depósito deve ser superior a zero.');
+      return;
+    }
+
+    setSubmittingDeposit(true);
+    const res = await requestDeposit({
       currency: selectedCurrency,
       amount: depositAmount,
       method: selectedMethod,
-      network: selectedCurrency === 'USDT' ? depositNetwork : undefined
+      network: selectedCurrency === 'USDT' ? depositNetwork : undefined,
+      reference: depositRefInput.trim() || undefined,
+      proofUrl: depositProofUrl || undefined
     });
+    setSubmittingDeposit(false);
 
+    if (!res.ok) {
+      setDepositErrorMsg(res.error || 'Não foi possível registrar o depósito.');
+      return;
+    }
+
+    setDepositRefInput('');
+    setDepositProofUrl('');
     setDepositSuccessMsg(true);
     setTimeout(() => {
       setDepositSuccessMsg(false);
       setWalletTab('history');
-    }, 2500);
+    }, 2000);
   };
 
-  const handleWithdrawSubmit = (e: React.FormEvent) => {
+  const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (withdrawAmount <= 0 || !withdrawDestination.trim()) return;
+    setWithdrawErrorMsg(null);
+    if (withdrawAmount <= 0 || !withdrawDestination.trim()) {
+      setWithdrawErrorMsg('Preencha o valor e o destino do levantamento.');
+      return;
+    }
 
-    requestWithdrawal({
+    setSubmittingWithdraw(true);
+    const res = await requestWithdrawal({
       currency: selectedCurrency,
       amount: withdrawAmount,
       method: selectedMethod,
-      destination: withdrawDestination,
+      destination: withdrawDestination.trim(),
       network: selectedCurrency === 'USDT' ? depositNetwork : undefined
     });
+    setSubmittingWithdraw(false);
 
+    if (!res.ok) {
+      setWithdrawErrorMsg(res.error || 'Não foi possível solicitar o levantamento.');
+      return;
+    }
+
+    setWithdrawDestination('');
     setWithdrawSuccessMsg(true);
     setTimeout(() => {
       setWithdrawSuccessMsg(false);
       setWalletTab('history');
-    }, 2500);
+    }, 2000);
   };
 
   return (
@@ -338,10 +384,10 @@ export const WalletView: React.FC = () => {
       </div>
 
       {/* Navigation Sub-Tabs */}
-      <div className="flex border-b border-neutral-800 gap-6 text-sm font-semibold">
+      <div className="flex overflow-x-auto border-b border-neutral-800 gap-6 text-sm font-semibold scrollbar-none">
         <button
           onClick={() => setWalletTab('overview')}
-          className={`pb-3 transition-colors ${
+          className={`pb-3 whitespace-nowrap transition-colors ${
             walletTab === 'overview' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-neutral-400 hover:text-white'
           }`}
         >
@@ -349,7 +395,7 @@ export const WalletView: React.FC = () => {
         </button>
         <button
           onClick={() => setWalletTab('deposit')}
-          className={`pb-3 transition-colors flex items-center gap-1.5 ${
+          className={`pb-3 whitespace-nowrap transition-colors flex items-center gap-1.5 ${
             walletTab === 'deposit' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-neutral-400 hover:text-white'
           }`}
         >
@@ -358,7 +404,7 @@ export const WalletView: React.FC = () => {
         </button>
         <button
           onClick={() => setWalletTab('withdraw')}
-          className={`pb-3 transition-colors flex items-center gap-1.5 ${
+          className={`pb-3 whitespace-nowrap transition-colors flex items-center gap-1.5 ${
             walletTab === 'withdraw' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-neutral-400 hover:text-white'
           }`}
         >
@@ -367,12 +413,21 @@ export const WalletView: React.FC = () => {
         </button>
         <button
           onClick={() => setWalletTab('history')}
-          className={`pb-3 transition-colors flex items-center gap-1.5 ${
+          className={`pb-3 whitespace-nowrap transition-colors flex items-center gap-1.5 ${
             walletTab === 'history' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-neutral-400 hover:text-white'
           }`}
         >
           <Clock className="w-4 h-4" />
-          Histórico
+          Transações ({transactions.length})
+        </button>
+        <button
+          onClick={() => setWalletTab('matches')}
+          className={`pb-3 whitespace-nowrap transition-colors flex items-center gap-1.5 ${
+            walletTab === 'matches' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-neutral-400 hover:text-white'
+          }`}
+        >
+          <Trophy className="w-4 h-4" />
+          Partidas ({matchHistory.length})
         </button>
       </div>
 
@@ -454,6 +509,12 @@ export const WalletView: React.FC = () => {
               {selectedCurrency}
             </span>
           </div>
+
+          {depositErrorMsg && (
+            <div className="p-4 rounded-xl bg-red-950/70 border border-red-600 text-red-200 text-xs font-bold">
+              {depositErrorMsg}
+            </div>
+          )}
 
           {depositSuccessMsg && (
             <div className="p-4 rounded-xl bg-emerald-950/60 border border-emerald-500 text-emerald-200 text-xs flex items-center gap-3">
@@ -664,25 +725,38 @@ export const WalletView: React.FC = () => {
               </div>
             )}
 
-            {/* Reference input & proof simulation */}
-            <div>
-              <label className="text-xs font-bold text-neutral-300 block mb-1">
-                Referência da Transação / Hash:
-              </label>
-              <input
-                type="text"
-                value={depositRefInput}
-                onChange={(e) => setDepositRefInput(e.target.value)}
-                placeholder="Ex: MCX-99482104 ou TxHash 0x..."
-                className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-4 py-2.5 text-xs text-white focus:border-yellow-500 focus:outline-none"
-              />
+            {/* Reference input & proof upload */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Referência da Transação / Hash:
+                </label>
+                <input
+                  type="text"
+                  value={depositRefInput}
+                  onChange={(e) => setDepositRefInput(e.target.value)}
+                  placeholder="Ex: MCX-99482104 ou TxHash 0x..."
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-4 py-2.5 text-xs text-white focus:border-yellow-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Comprovativo (Imagem opcional):
+                </label>
+                <label className="w-full bg-neutral-950 border border-dashed border-neutral-700 hover:border-yellow-500 rounded-xl px-4 py-2.5 text-xs text-neutral-300 flex items-center justify-center gap-2 cursor-pointer">
+                  <Upload className="w-3.5 h-3.5 text-yellow-400" />
+                  <span>{depositProofUrl ? 'Comprovativo Anexado ✓' : 'Anexar Imagem'}</span>
+                  <input type="file" accept="image/*" onChange={handleDepositProofUpload} className="hidden" />
+                </label>
+              </div>
             </div>
 
             <button
               type="submit"
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-extrabold text-sm shadow-xl shadow-red-950 hover:brightness-110 active:scale-95 transition-all"
+              disabled={submittingDeposit}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-extrabold text-sm shadow-xl shadow-red-950 hover:brightness-110 active:scale-95 transition-all disabled:opacity-60"
             >
-              CONFIRMAR REGISTRO DE DEPÓSITO
+              {submittingDeposit ? 'A ENVIAR PARA AUDITORIA...' : 'CONFIRMAR REGISTRO DE DEPÓSITO'}
             </button>
           </form>
         </div>
@@ -702,6 +776,12 @@ export const WalletView: React.FC = () => {
               Saldo: {selectedCurrency === 'KZ' ? `${currentUser.kzBalance.toLocaleString('pt-AO')} Kz` : `${currentUser.usdtBalance.toLocaleString('pt-AO')} USDT`}
             </span>
           </div>
+
+          {withdrawErrorMsg && (
+            <div className="p-4 rounded-xl bg-red-950/70 border border-red-600 text-red-200 text-xs font-bold">
+              {withdrawErrorMsg}
+            </div>
+          )}
 
           {withdrawSuccessMsg && (
             <div className="p-4 rounded-xl bg-emerald-950/60 border border-emerald-500 text-emerald-200 text-xs flex items-center gap-3">
@@ -755,64 +835,152 @@ export const WalletView: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-extrabold text-sm shadow-xl shadow-red-950 hover:brightness-110 active:scale-95 transition-all"
+              disabled={submittingWithdraw}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 text-white font-extrabold text-sm shadow-xl shadow-red-950 hover:brightness-110 active:scale-95 transition-all disabled:opacity-60"
             >
-              SOLICITAR LEVANTAMENTO
+              {submittingWithdraw ? 'A PROCESSAR LEVANTAMENTO...' : 'SOLICITAR LEVANTAMENTO'}
             </button>
           </form>
         </div>
       )}
 
-      {/* SUB-TAB: HISTÓRICO */}
+      {/* SUB-TAB: HISTÓRICO FINANCEIRO */}
       {walletTab === 'history' && (
         <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-base font-bold text-white">Histórico de Operações</h3>
+            <h3 className="text-base font-bold text-white">Histórico de Operações Financeiras</h3>
             <span className="text-xs text-neutral-400">{transactions.length} transações registradas</span>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-neutral-950 text-neutral-400 border-b border-neutral-800 uppercase tracking-wider text-[10px]">
-                <tr>
-                  <th className="p-3">Data</th>
-                  <th className="p-3">Tipo</th>
-                  <th className="p-3">Método</th>
-                  <th className="p-3">Referência</th>
-                  <th className="p-3">Valor</th>
-                  <th className="p-3">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-800/80">
-                {transactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-neutral-800/40">
-                    <td className="p-3 text-neutral-400">{tx.createdAt}</td>
-                    <td className="p-3 font-semibold text-white">
-                      {tx.type === 'DEPOSIT' ? 'Depósito' : tx.type === 'WITHDRAW' ? 'Levantamento' : tx.type === 'BET_WIN' ? 'Prémio de Partida' : 'Aposta'}
-                    </td>
-                    <td className="p-3 text-neutral-300 font-mono text-[11px]">{tx.method}</td>
-                    <td className="p-3 font-mono text-neutral-400 text-[11px]">{tx.reference}</td>
-                    <td className="p-3 font-bold tabular-nums">
-                      <span className={tx.type === 'WITHDRAW' ? 'text-red-400' : 'text-emerald-400'}>
-                        {tx.type === 'WITHDRAW' ? '-' : '+'}{tx.amount.toLocaleString('pt-AO')} {tx.currency}
-                      </span>
-                    </td>
-                    <td className="p-3">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        tx.status === 'Confirmado' || tx.status === 'Pago'
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                          : tx.status === 'Em validação' || tx.status === 'Pendente'
-                          ? 'bg-amber-950 text-yellow-300 border border-yellow-800'
-                          : 'bg-red-950 text-red-300 border border-red-800'
-                      }`}>
-                        {tx.status}
-                      </span>
-                    </td>
+          {transactions.length === 0 ? (
+            <p className="text-xs text-neutral-500 py-8 text-center">
+              Ainda não tem operações financeiras registradas na sua conta.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-neutral-950 text-neutral-400 border-b border-neutral-800 uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="p-3">Data</th>
+                    <th className="p-3">Tipo</th>
+                    <th className="p-3">Método</th>
+                    <th className="p-3">Referência</th>
+                    <th className="p-3">Valor</th>
+                    <th className="p-3">Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-neutral-800/80">
+                  {transactions.map((tx) => {
+                    const isOutflow = tx.type === 'WITHDRAW' || tx.type === 'BET_ENTRY' || tx.type === 'THEME_UNLOCK';
+                    const typeLabel =
+                      tx.type === 'DEPOSIT'
+                        ? 'Depósito'
+                        : tx.type === 'WITHDRAW'
+                        ? 'Levantamento'
+                        : tx.type === 'BET_WIN'
+                        ? 'Prémio de Partida'
+                        : tx.type === 'BET_ENTRY'
+                        ? 'Entrada em Mesa'
+                        : tx.type === 'THEME_UNLOCK'
+                        ? `Tabuleiro (${tx.themeName || tx.themeId || 'Premium'})`
+                        : 'Comissão';
+                    return (
+                      <tr key={tx.id} className="hover:bg-neutral-800/40">
+                        <td className="p-3 text-neutral-400 whitespace-nowrap">{tx.createdAt}</td>
+                        <td className="p-3 font-semibold text-white">{typeLabel}</td>
+                        <td className="p-3 text-neutral-300 font-mono text-[11px]">{tx.method}</td>
+                        <td className="p-3 font-mono text-neutral-400 text-[11px]">{tx.reference}</td>
+                        <td className="p-3 font-bold tabular-nums whitespace-nowrap">
+                          <span className={isOutflow ? 'text-red-400' : 'text-emerald-400'}>
+                            {isOutflow ? '-' : '+'}{tx.amount.toLocaleString('pt-AO')} {tx.currency}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            tx.status === 'Confirmado' || tx.status === 'Pago'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : tx.status === 'Em validação' || tx.status === 'Pendente'
+                              ? 'bg-amber-950 text-yellow-300 border border-yellow-800'
+                              : 'bg-red-950 text-red-300 border border-red-800'
+                          }`}>
+                            {tx.status}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SUB-TAB: HISTÓRICO DE PARTIDAS */}
+      {walletTab === 'matches' && (
+        <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Trophy className="w-4 h-4 text-yellow-400" />
+              Histórico de Partidas Realizadas
+            </h3>
+            <span className="text-xs text-neutral-400">{matchHistory.length} partidas</span>
           </div>
+
+          {matchHistory.length === 0 ? (
+            <p className="text-xs text-neutral-500 py-8 text-center">
+              Ainda não concluiu nenhuma partida. Entre numa mesa e conquiste a sua primeira vitória!
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-neutral-950 text-neutral-400 border-b border-neutral-800 uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="p-3">Data</th>
+                    <th className="p-3">Sala</th>
+                    <th className="p-3">Vencedor</th>
+                    <th className="p-3">Modo</th>
+                    <th className="p-3">Aposta</th>
+                    <th className="p-3">Prémio</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-800/80">
+                  {matchHistory.map((m) => {
+                    const iWon = m.winnerUserId === currentUser.id;
+                    return (
+                      <tr key={m.id} className="hover:bg-neutral-800/40">
+                        <td className="p-3 text-neutral-400 whitespace-nowrap">{m.finishedAt}</td>
+                        <td className="p-3">
+                          <span className="font-bold text-white block">{m.roomName}</span>
+                          <span className="text-[10px] font-mono text-yellow-400">{m.roomCode}</span>
+                        </td>
+                        <td className="p-3">
+                          <span className={`font-bold ${iWon ? 'text-emerald-400' : 'text-neutral-200'}`}>
+                            {m.winnerName || 'N/D'} {iWon ? '(Você 🏆)' : ''}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            m.isDemo
+                              ? 'bg-yellow-950 text-yellow-300 border border-yellow-800'
+                              : 'bg-red-950 text-red-300 border border-red-800'
+                          }`}>
+                            {m.isDemo ? 'DEMO / Grátis' : 'REAL'}
+                          </span>
+                        </td>
+                        <td className="p-3 tabular-nums text-neutral-300">
+                          {m.betAmount.toLocaleString('pt-AO')} {m.currency}
+                        </td>
+                        <td className="p-3 font-bold tabular-nums text-emerald-400">
+                          {m.prizePool.toLocaleString('pt-AO')} {m.currency}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
