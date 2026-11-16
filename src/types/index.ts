@@ -130,8 +130,10 @@ export interface Room {
   maxPlayers: 2 | 3 | 4;
   currency: Currency;
   betAmount: number;
-  prizePool: number; // 75% of total
-  platformCommission: number; // 25% of total
+  prizePool: number; // dynamic winner percentage of total
+  platformCommission: number; // dynamic bank commission percentage of total
+  winnerPercent?: number;
+  commissionPercent?: number;
   isPrivate: boolean;
   isDemo?: boolean;
   boardTheme?: BoardThemeId;
@@ -236,4 +238,15 @@ export interface PaymentSettings {
   usdtNetwork: string;
   binancePayId?: string;
   bybitUid?: string;
+}
+
+export interface ThemePriceConfig {
+  priceKz: number;
+  priceUsdt: number;
+}
+
+export interface PlatformConfig {
+  winnerPercent: number;
+  commissionPercent: number;
+  themePrices: Record<BoardThemeId, ThemePriceConfig>;
 }

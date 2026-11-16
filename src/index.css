@@ -36,15 +36,15 @@
   background: rgba(220, 38, 38, 0.8);
 }
 
-/* True 3D Casino Dice Styles & Rolling Physics (zero CSS box-shadows for 60fps GPU rotation) */
+/* True 3D Classic Casino Dice Styles & Rolling Physics (zero CSS box-shadows for 60fps GPU rotation) */
 .dice-3d-scene {
-  perspective: 680px;
+  perspective: 650px;
 }
 
 .dice-3d-cube {
-  --dice-half: 24px;
-  width: 48px;
-  height: 48px;
+  --dice-half: 22px;
+  width: 44px;
+  height: 44px;
   position: relative;
   transform-style: preserve-3d;
   will-change: transform;
@@ -53,9 +53,9 @@
 
 @media (min-width: 640px) {
   .dice-3d-cube {
-    --dice-half: 27px;
-    width: 54px;
-    height: 54px;
+    --dice-half: 25px;
+    width: 50px;
+    height: 50px;
   }
 }
 
@@ -63,31 +63,73 @@
   transition: none;
 }
 
-.dice-core-plane {
-  position: absolute;
-  inset: 2px;
-  border-radius: 9px;
-  background: #cfc6b2;
-  pointer-events: none;
-}
-.dice-core-xy { transform: translateZ(0px); }
-.dice-core-xz { transform: rotateX(90deg); }
-.dice-core-yz { transform: rotateY(90deg); }
-
 .dice-3d-face {
   position: absolute;
   inset: 0;
-  border-radius: 10px;
-  overflow: hidden;
+  border-radius: 9px;
+  border: 1.5px solid #cbd5e1;
+  background: linear-gradient(145deg, #ffffff 0%, #f1f5f9 100%);
   backface-visibility: hidden;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  padding: 6px;
+  gap: 2px;
 }
 
-.dice-face-1 { transform: rotateY(0deg) translateZ(var(--dice-half)); }
-.dice-face-6 { transform: rotateY(180deg) translateZ(var(--dice-half)); }
-.dice-face-3 { transform: rotateY(90deg) translateZ(var(--dice-half)); }
-.dice-face-4 { transform: rotateY(-90deg) translateZ(var(--dice-half)); }
-.dice-face-2 { transform: rotateX(90deg) translateZ(var(--dice-half)); }
-.dice-face-5 { transform: rotateX(-90deg) translateZ(var(--dice-half)); }
+.dice-face-1 {
+  transform: rotateY(0deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+}
+.dice-face-6 {
+  transform: rotateY(180deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #f8fafc 0%, #e2e8f0 100%);
+}
+.dice-face-3 {
+  transform: rotateY(90deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #f8fafc 0%, #e2e8f0 100%);
+}
+.dice-face-4 {
+  transform: rotateY(-90deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #f1f5f9 0%, #e2e8f0 100%);
+}
+.dice-face-2 {
+  transform: rotateX(90deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #ffffff 0%, #f1f5f9 100%);
+}
+.dice-face-5 {
+  transform: rotateX(-90deg) translateZ(var(--dice-half));
+  background: linear-gradient(145deg, #f1f5f9 0%, #dbeafe 100%);
+}
+
+.dice-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: #0f172a;
+  align-self: center;
+  justify-self: center;
+}
+
+@media (min-width: 640px) {
+  .dice-pip {
+    width: 8px;
+    height: 8px;
+  }
+}
+
+.dice-pip-red {
+  width: 11px;
+  height: 11px;
+  background: #dc2626;
+}
+
+@media (min-width: 640px) {
+  .dice-pip-red {
+    width: 12px;
+    height: 12px;
+  }
+}
 
 @keyframes dice-3d-tumble {
   0%   { transform: translate3d(0, 0, 18px) rotateX(0deg) rotateY(0deg) rotateZ(0deg) scale(1); }
@@ -159,3 +201,108 @@
 .animate-avatar-monster {
   animation: avatar-monster-pop 2.1s cubic-bezier(0.2, 0.9, 0.25, 1) forwards;
 }
+
+/* Piece Capture Combat Skills (60fps GPU transform/opacity only) */
+@keyframes skill-ring-expand {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.3);
+  }
+  55% {
+    opacity: 0.7;
+    transform: scale(1.25);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+.animate-skill-ring {
+  animation: skill-ring-expand 0.95s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes skill-projectile-shoot {
+  0% {
+    opacity: 0;
+    transform: translate3d(-26px, -8px, 0) scale(0.55) rotate(-12deg);
+  }
+  22% {
+    opacity: 1;
+    transform: translate3d(-4px, -2px, 0) scale(1.18) rotate(4deg);
+  }
+  65% {
+    opacity: 1;
+    transform: translate3d(8px, 0, 0) scale(1.12) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(18px, -4px, 0) scale(0.85) rotate(8deg);
+  }
+}
+
+.animate-skill-projectile {
+  animation: skill-projectile-shoot 1.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes skill-smash-drop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -34px, 0) scale(0.6);
+  }
+  24% {
+    opacity: 1;
+    transform: translate3d(0, 4px, 0) scale(1.28);
+  }
+  42% {
+    opacity: 1;
+    transform: translate3d(0, -3px, 0) scale(1.06);
+  }
+  78% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.04);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.85);
+  }
+}
+
+.animate-skill-smash {
+  animation: skill-smash-drop 1.15s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes skill-label-pop {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, 6px, 0) scale(0.7);
+  }
+  18% {
+    opacity: 1;
+    transform: translate3d(-50%, -6px, 0) scale(1.08);
+  }
+  80% {
+    opacity: 1;
+    transform: translate3d(-50%, -10px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -18px, 0) scale(0.92);
+  }
+}
+
+.animate-skill-label {
+  animation: skill-label-pop 1.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes piece-attack-lunge {
+  0% { transform: scale(1) translate3d(0, 0, 0); }
+  25% { transform: scale(1.28) translate3d(0, -6px, 0) rotate(-8deg); }
+  55% { transform: scale(1.22) translate3d(0, -3px, 0) rotate(6deg); }
+  100% { transform: scale(1) translate3d(0, 0, 0); }
+}
+
+.animate-piece-attack {
+  animation: piece-attack-lunge 0.65s cubic-bezier(0.22, 1, 0.36, 1);
+}
+

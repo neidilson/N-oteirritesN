@@ -23,9 +23,14 @@ import {
   Smartphone,
   Save,
   LogOut,
-  ArrowLeft
+  ArrowLeft,
+  Percent,
+  Palette,
+  RotateCcw
 } from 'lucide-react';
-import { Transaction } from '../types';
+import { Transaction, BoardThemeId, ThemePriceConfig } from '../types';
+import { BOARD_THEME_LIST } from '../utils/boardThemes';
+import { DEFAULT_PLATFORM_CONFIG } from '../context/GameContext';
 
 export const AdminPanel: React.FC = () => {
   const {
@@ -45,11 +50,13 @@ export const AdminPanel: React.FC = () => {
     lockAdmin,
     paymentSettings,
     updatePaymentSettings,
+    platformConfig,
+    updatePlatformConfig,
     setActiveTab,
     logout
   } = useGame();
 
-  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'treasury' | 'rooms' | 'support' | 'payments'>('kpis');
+  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'treasury' | 'rooms' | 'support' | 'payments' | 'rules'>('kpis');
   const [searchTerm, setSearchTerm] = useState('');
   const [adminReplyText, setAdminReplyText] = useState('');
   const [activeTicketId, setActiveTicketId] = useState<string>(supportTickets[0]?.id || '');
@@ -67,6 +74,20 @@ export const AdminPanel: React.FC = () => {
   const [binancePayId, setBinancePayId] = useState(paymentSettings.binancePayId || '849201948');
   const [bybitUid, setBybitUid] = useState(paymentSettings.bybitUid || '6291048');
   const [paymentSavedFeedback, setPaymentSavedFeedback] = useState(false);
+
+  // Platform percentages & locked board theme prices draft state
+  const [winnerPctDraft, setWinnerPctDraft] = useState<number>(platformConfig.winnerPercent);
+  const [commPctDraft, setCommPctDraft] = useState<number>(platformConfig.commissionPercent);
+  const [themePricesDraft, setThemePricesDraft] = useState<Record<BoardThemeId, ThemePriceConfig>>(
+    platformConfig.themePrices
+  );
+  const [rulesSavedFeedback, setRulesSavedFeedback] = useState(false);
+
+  React.useEffect(() => {
+    setWinnerPctDraft(platformConfig.winnerPercent);
+    setCommPctDraft(platformConfig.commissionPercent);
+    setThemePricesDraft(platformConfig.themePrices);
+  }, [platformConfig]);
 
   // Financial aggregates
   const totalKzDeposits = transactions
@@ -288,7 +309,8 @@ export const AdminPanel: React.FC = () => {
           { id: 'treasury', label: 'D. Tesouraria (Banca N)', icon: FileText },
           { id: 'rooms', label: `E. Mesas Ativas (${rooms.length})`, icon: Swords },
           { id: 'support', label: 'F. Mensagens Suporte', icon: MessageSquare },
-          { id: 'payments', label: 'G. Formas de Pagamento (IBAN/MCX)', icon: CreditCard }
+          { id: 'payments', label: 'G. Formas de Pagamento (IBAN/MCX)', icon: CreditCard },
+          { id: 'rules', label: 'H. Taxas & Tabuleiros', icon: Percent }
         ].map((tab) => {
           const Icon = tab.icon;
           return (
@@ -344,7 +366,7 @@ export const AdminPanel: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-5 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-2">
               <span className="text-xs text-neutral-400 font-bold uppercase tracking-wider">
-                Comissões Acumuladas da Plataforma (25%)
+                Comissões Acumuladas da Plataforma ({platformConfig.commissionPercent}%)
               </span>
               <div className="text-2xl font-black text-yellow-400">
                 {totalPlatformCommissionKz.toLocaleString('pt-AO')} Kz
@@ -1071,6 +1093,296 @@ export const AdminPanel: React.FC = () => {
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* H. PERCENTAGENS DO VENCEDOR, COMISSÃO DA BANCA & PREÇOS DOS TABULEIROS BLOQUEADOS */}
+      {adminTab === 'rules' && (
+        <div className="space-y-6">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              updatePlatformConfig({
+                winnerPercent: winnerPctDraft,
+                commissionPercent: commPctDraft,
+                themePrices: themePricesDraft
+              });
+              setRulesSavedFeedback(true);
+              setTimeout(() => setRulesSavedFeedback(false), 4000);
+            }}
+            className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-6"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800 pb-4">
+              <div>
+                <span className="text-[10px] uppercase font-black tracking-widest text-yellow-400 block">
+                  Regras Financeiras & Loja de Arenas
+                </span>
+                <h2 className="text-xl font-black text-white mt-0.5">
+                  Percentagem do Vencedor, Comissão da Banca e Preços dos Tabuleiros
+                </h2>
+                <p className="text-xs text-neutral-400 mt-1">
+                  Defina quanto o campeão ganha por partida, a comissão retida pela Banca N e os valores de desbloqueio de cada tabuleiro bloqueado.
+                </p>
+              </div>
+
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-red-950 transition-all shrink-0 active:scale-95"
+              >
+                <Save className="w-4 h-4" />
+                <span>Guardar Taxas & Preços</span>
+              </button>
+            </div>
+
+            {rulesSavedFeedback && (
+              <div className="p-4 rounded-xl bg-emerald-950/80 border border-emerald-500 text-emerald-200 text-xs flex items-center gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div>
+                  <b className="block text-sm text-white">Configurações guardadas e sincronizadas em tempo real!</b>
+                  Vencedor: <b>{winnerPctDraft}%</b> · Comissão da Banca: <b>{commPctDraft}%</b> · Preços dos tabuleiros atualizados para todos os jogadores.
+                </div>
+              </div>
+            )}
+
+            {/* Section 1: Winner & Bank Commission Split */}
+            <div className="rounded-2xl p-5 bg-neutral-950 border border-yellow-500/30 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-800 pb-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 flex items-center justify-center">
+                    <Percent className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white">Divisão do Prémio das Mesas</h3>
+                    <span className="text-[10px] text-neutral-400 block">
+                      A soma da percentagem do vencedor + comissão da banca fecha sempre em 100%
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { w: 70, c: 30 },
+                    { w: 75, c: 25 },
+                    { w: 80, c: 20 },
+                    { w: 85, c: 15 },
+                    { w: 90, c: 10 }
+                  ].map((preset) => (
+                    <button
+                      key={preset.w}
+                      type="button"
+                      onClick={() => {
+                        setWinnerPctDraft(preset.w);
+                        setCommPctDraft(preset.c);
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${
+                        winnerPctDraft === preset.w
+                          ? 'bg-yellow-500/20 border-yellow-400 text-yellow-300'
+                          : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:border-neutral-500'
+                      }`}
+                    >
+                      {preset.w}% / {preset.c}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div className="p-4 rounded-xl bg-neutral-900 border border-emerald-500/30 space-y-2">
+                  <label className="text-xs font-bold text-emerald-300 block">
+                    Percentagem Ganha pelo Vencedor (%)
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={winnerPctDraft}
+                      onChange={(e) => {
+                        const val = Math.min(99, Math.max(1, Math.round(Number(e.target.value) || 1)));
+                        setWinnerPctDraft(val);
+                        setCommPctDraft(100 - val);
+                      }}
+                      className="w-28 bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-lg font-mono font-black text-emerald-400 focus:outline-none focus:border-emerald-500"
+                    />
+                    <input
+                      type="range"
+                      min={1}
+                      max={99}
+                      value={winnerPctDraft}
+                      onChange={(e) => {
+                        const val = Math.min(99, Math.max(1, Math.round(Number(e.target.value))));
+                        setWinnerPctDraft(val);
+                        setCommPctDraft(100 - val);
+                      }}
+                      className="flex-1 accent-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-neutral-900 border border-red-500/30 space-y-2">
+                  <label className="text-xs font-bold text-red-300 block">
+                    Comissão da Banca N (%)
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={commPctDraft}
+                      onChange={(e) => {
+                        const val = Math.min(99, Math.max(1, Math.round(Number(e.target.value) || 1)));
+                        setCommPctDraft(val);
+                        setWinnerPctDraft(100 - val);
+                      }}
+                      className="w-28 bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-lg font-mono font-black text-yellow-400 focus:outline-none focus:border-red-500"
+                    />
+                    <input
+                      type="range"
+                      min={1}
+                      max={99}
+                      value={commPctDraft}
+                      onChange={(e) => {
+                        const val = Math.min(99, Math.max(1, Math.round(Number(e.target.value))));
+                        setCommPctDraft(val);
+                        setWinnerPctDraft(100 - val);
+                      }}
+                      className="flex-1 accent-red-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Example Simulation */}
+              <div className="p-3.5 rounded-xl bg-neutral-900/70 border border-neutral-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <span className="text-neutral-400">
+                  Simulação (Mesa de 2 Jogadores × 10.000 Kz = <b className="text-white">20.000 Kz</b>):
+                </span>
+                <div className="flex items-center gap-4">
+                  <span className="text-emerald-400 font-bold">
+                    Vencedor ({winnerPctDraft}%): {Math.round(20000 * (winnerPctDraft / 100)).toLocaleString('pt-AO')} Kz
+                  </span>
+                  <span className="text-yellow-400 font-bold">
+                    Banca ({commPctDraft}%): {(20000 - Math.round(20000 * (winnerPctDraft / 100))).toLocaleString('pt-AO')} Kz
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Locked Board Themes Prices */}
+            <div className="rounded-2xl p-5 bg-neutral-950 border border-purple-500/30 space-y-4">
+              <div className="flex items-center gap-3 border-b border-neutral-800 pb-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center justify-center">
+                  <Palette className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white">Valores dos Tabuleiros Bloqueados</h3>
+                  <span className="text-[10px] text-neutral-400 block">
+                    Edite o valor em Kwanzas (KZ) e em USDT para desbloquear cada arena premium
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {BOARD_THEME_LIST.filter((t) => !t.isFree).map((theme) => {
+                  const cfg = themePricesDraft[theme.id] || {
+                    priceKz: theme.priceKz,
+                    priceUsdt: theme.priceUsdt
+                  };
+                  return (
+                    <div
+                      key={theme.id}
+                      className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3"
+                    >
+                      <div className="flex items-center gap-3">
+                        {theme.artUrl ? (
+                          <img
+                            src={theme.artUrl}
+                            alt={theme.name}
+                            referrerPolicy="no-referrer"
+                            className="w-11 h-11 rounded-lg object-cover border border-white/15 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-11 h-11 rounded-lg bg-neutral-800 flex items-center justify-center text-lg shrink-0">
+                            {theme.centerSymbol}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <h4 className="text-sm font-black text-white truncate">{theme.name}</h4>
+                          <span className="text-[11px] text-yellow-400 font-semibold block truncate">
+                            {theme.subtitle}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[11px] font-bold text-neutral-300 block mb-1">
+                            Valor em Kwanzas (KZ):
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={500}
+                            value={cfg.priceKz}
+                            onChange={(e) => {
+                              const nextKz = Math.max(0, Math.round(Number(e.target.value) || 0));
+                              setThemePricesDraft((prev) => ({
+                                ...prev,
+                                [theme.id]: { ...cfg, priceKz: nextKz }
+                              }));
+                            }}
+                            className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-xs font-mono font-bold text-yellow-400 focus:outline-none focus:border-yellow-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] font-bold text-neutral-300 block mb-1">
+                            Valor em USDT:
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={cfg.priceUsdt}
+                            onChange={(e) => {
+                              const nextUsdt = Math.max(0, Number(e.target.value) || 0);
+                              setThemePricesDraft((prev) => ({
+                                ...prev,
+                                [theme.id]: { ...cfg, priceUsdt: nextUsdt }
+                              }));
+                            }}
+                            className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-xs font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setWinnerPctDraft(DEFAULT_PLATFORM_CONFIG.winnerPercent);
+                  setCommPctDraft(DEFAULT_PLATFORM_CONFIG.commissionPercent);
+                  setThemePricesDraft(DEFAULT_PLATFORM_CONFIG.themePrices);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs flex items-center gap-1.5"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Restaurar Padrão (75% / 25%)</span>
+              </button>
+              <button
+                type="submit"
+                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-xl shadow-red-950 active:scale-95"
+              >
+                <Save className="w-4 h-4" />
+                <span>Salvar Percentagens & Preços</span>
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

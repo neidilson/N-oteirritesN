@@ -3,7 +3,7 @@ import { useGame } from '../context/GameContext';
 import { HelpCircle, Send, MessageSquare, ShieldAlert, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react';
 
 export const SupportView: React.FC = () => {
-  const { currentUser, supportTickets, sendSupportMessage } = useGame();
+  const { currentUser, supportTickets, sendSupportMessage, platformConfig } = useGame();
   const [msgInput, setMsgInput] = useState('');
   const [selectedSubject, setSelectedSubject] = useState('Dúvida sobre Depósitos Multicaixa Express / USDT');
   const [openFaq, setOpenFaq] = useState<number | null>(null);
@@ -32,7 +32,7 @@ export const SupportView: React.FC = () => {
     },
     {
       q: 'Qual é o modelo de distribuição de prémios?',
-      a: 'Em cada mesa, 75% do total acumulado das apostas de todos os jogadores participantes é entregue integralmente ao vencedor, e 25% corresponde à comissão de manutenção da plataforma N.'
+      a: `Em cada mesa, ${platformConfig.winnerPercent}% do total acumulado das apostas de todos os jogadores participantes é entregue integralmente ao vencedor, e ${platformConfig.commissionPercent}% corresponde à comissão de manutenção da plataforma N.`
     },
     {
       q: 'O que acontece se a conexão à internet falhar durante a partida?',

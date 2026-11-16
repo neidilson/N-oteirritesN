@@ -1,4 +1,6 @@
+import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +14,8 @@ import type {
   Currency,
   PlayerCategory,
   ChatMessage,
-  BoardThemeId
+  BoardThemeId,
+  PlatformConfig
 } from './src/types/index.ts';
 import {
   SAFE_CELLS,
@@ -42,6 +45,77 @@ const roomsMap = new Map<string, Room>();
 const clientsMap = new Map<WebSocket, ClientMeta>();
 const rollingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const botTurnTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+const PLATFORM_CONFIG_FILE = process.env.PLATFORM_CONFIG_PATH || '/tmp/nti_platform_config.json';
+
+const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
+  winnerPercent: 75,
+  commissionPercent: 25,
+  themePrices: {
+    classic: { priceKz: 0, priceUsdt: 0 },
+    kingdoms: { priceKz: 15000, priceUsdt: 16 },
+    football: { priceKz: 25000, priceUsdt: 27 },
+    future: { priceKz: 20000, priceUsdt: 22 },
+    gang: { priceKz: 18000, priceUsdt: 20 },
+    egyptian: { priceKz: 22000, priceUsdt: 24 }
+  }
+};
+
+function sanitizePlatformConfig(raw: Partial<PlatformConfig> | null | undefined): PlatformConfig {
+  const base = DEFAULT_PLATFORM_CONFIG;
+  let winnerPercent = Number(raw?.winnerPercent);
+  let commissionPercent = Number(raw?.commissionPercent);
+
+  if (Number.isFinite(winnerPercent) && !Number.isFinite(commissionPercent)) {
+    winnerPercent = Math.min(99, Math.max(1, Math.round(winnerPercent)));
+    commissionPercent = 100 - winnerPercent;
+  } else if (Number.isFinite(commissionPercent) && !Number.isFinite(winnerPercent)) {
+    commissionPercent = Math.min(99, Math.max(1, Math.round(commissionPercent)));
+    winnerPercent = 100 - commissionPercent;
+  } else if (Number.isFinite(winnerPercent) && Number.isFinite(commissionPercent)) {
+    winnerPercent = Math.min(99, Math.max(1, Math.round(winnerPercent)));
+    commissionPercent = 100 - winnerPercent;
+  } else {
+    winnerPercent = base.winnerPercent;
+    commissionPercent = base.commissionPercent;
+  }
+
+  const themeIds: BoardThemeId[] = ['classic', 'kingdoms', 'football', 'future', 'gang', 'egyptian'];
+  const themePrices = { ...base.themePrices };
+  for (const id of themeIds) {
+    const incoming = raw?.themePrices?.[id];
+    if (incoming) {
+      themePrices[id] = {
+        priceKz: Math.max(0, Math.round(Number(incoming.priceKz) || 0)),
+        priceUsdt: Math.max(0, Number((Number(incoming.priceUsdt) || 0).toFixed(2)))
+      };
+    }
+  }
+
+  return { winnerPercent, commissionPercent, themePrices };
+}
+
+function loadPlatformConfig(): PlatformConfig {
+  try {
+    if (fs.existsSync(PLATFORM_CONFIG_FILE)) {
+      const text = fs.readFileSync(PLATFORM_CONFIG_FILE, 'utf8');
+      return sanitizePlatformConfig(JSON.parse(text));
+    }
+  } catch {
+    // fallback to defaults
+  }
+  return sanitizePlatformConfig(DEFAULT_PLATFORM_CONFIG);
+}
+
+function savePlatformConfig(config: PlatformConfig) {
+  try {
+    fs.writeFileSync(PLATFORM_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  } catch {
+    // ignore disk errors
+  }
+}
+
+let platformConfig: PlatformConfig = loadPlatformConfig();
 
 const BOT_PROFILES = [
   { name: 'Bot Kilamba (IA)', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=BotKilamba&backgroundColor=2563eb' },
@@ -127,8 +201,10 @@ function createEmptyRoom(params: {
   boardTheme?: BoardThemeId;
 }): Room {
   const totalPot = params.betAmount * params.maxPlayers;
-  const prizePool = Math.round(totalPot * 0.75);
-  const platformCommission = Math.round(totalPot * 0.25);
+  const winnerPercent = platformConfig.winnerPercent;
+  const commissionPercent = platformConfig.commissionPercent;
+  const prizePool = Math.round(totalPot * (winnerPercent / 100));
+  const platformCommission = Math.max(0, totalPot - prizePool);
 
   return {
     id: params.id,
@@ -140,6 +216,8 @@ function createEmptyRoom(params: {
     betAmount: params.betAmount,
     prizePool,
     platformCommission,
+    winnerPercent,
+    commissionPercent,
     isPrivate: params.isPrivate,
     isDemo: params.isDemo,
     boardTheme: params.boardTheme || 'classic',
@@ -788,12 +866,20 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
+  app.get('/health', (_req, res) => {
+    res.status(200).type('text/plain').send('ok');
+  });
+
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
       onlineUsers: getOnlineCount(),
       roomsCount: roomsMap.size
     });
+  });
+
+  app.get('/api/platform-config', (_req, res) => {
+    res.json({ config: platformConfig });
   });
 
   app.get('/api/rooms', (req, res) => {
@@ -857,11 +943,52 @@ async function startServer() {
         }
 
         sendToClient(ws, {
+          type: 'platform:config',
+          config: platformConfig
+        });
+        sendToClient(ws, {
           type: 'rooms:list',
           rooms: getVisibleRoomsForUser(meta.userId),
           onlineCount: getOnlineCount()
         });
         broadcastRoomsList();
+        return;
+      }
+
+      if (type === 'admin:update_platform_config') {
+        const incoming = (msg.config || {}) as Partial<PlatformConfig>;
+        platformConfig = sanitizePlatformConfig({
+          winnerPercent: incoming.winnerPercent ?? platformConfig.winnerPercent,
+          commissionPercent: incoming.commissionPercent ?? platformConfig.commissionPercent,
+          themePrices: {
+            ...platformConfig.themePrices,
+            ...(incoming.themePrices || {})
+          }
+        });
+        savePlatformConfig(platformConfig);
+
+        // Update WAITING rooms' prizePool & commission to reflect new admin percentages
+        for (const [rId, rm] of roomsMap.entries()) {
+          if (rm.status === 'WAITING') {
+            const pot = rm.betAmount * rm.maxPlayers;
+            const nextPrize = Math.round(pot * (platformConfig.winnerPercent / 100));
+            const nextComm = Math.max(0, pot - nextPrize);
+            const updatedRm: Room = {
+              ...rm,
+              prizePool: nextPrize,
+              platformCommission: nextComm,
+              winnerPercent: platformConfig.winnerPercent,
+              commissionPercent: platformConfig.commissionPercent
+            };
+            roomsMap.set(rId, updatedRm);
+            broadcastRoomState(rId);
+          }
+        }
+        broadcastRoomsList();
+
+        for (const clientWs of clientsMap.keys()) {
+          sendToClient(clientWs, { type: 'platform:config', config: platformConfig });
+        }
         return;
       }
 
@@ -1447,7 +1574,12 @@ async function startServer() {
     }
   }, 1000);
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(__dirname, 'dist');
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distPath));
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1455,8 +1587,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
+    app.use('/api', (_req, res) => {
+      res.status(404).json({ error: 'Not found' });
+    });
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

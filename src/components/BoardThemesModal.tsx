@@ -3,6 +3,7 @@ import { useGame } from '../context/GameContext';
 import { BOARD_THEME_LIST, BoardThemeDefinition } from '../utils/boardThemes';
 import { BoardThemeId, Currency, PaymentMethod } from '../types';
 import { ThemePieceFigure } from './ThemePieceFigure';
+import { getBaseCaptureSkill } from '../utils/captureSkills';
 import {
   X,
   Lock,
@@ -150,6 +151,7 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
     paymentSettings,
     selectBoardTheme,
     requestThemeUnlock,
+    getThemePrice,
     walletMode
   } = useGame();
 
@@ -289,7 +291,7 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
                           : 'bg-neutral-950 border-neutral-800 text-neutral-400'
                       }`}
                     >
-                      {payingTheme.priceKz.toLocaleString('pt-AO')} Kz
+                      {getThemePrice(payingTheme.id).priceKz.toLocaleString('pt-AO')} Kz
                     </button>
                     <button
                       type="button"
@@ -303,7 +305,7 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
                           : 'bg-neutral-950 border-neutral-800 text-neutral-400'
                       }`}
                     >
-                      {payingTheme.priceUsdt} USDT
+                      {getThemePrice(payingTheme.id).priceUsdt} USDT
                     </button>
                   </div>
                 </div>
@@ -335,7 +337,7 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
               {/* Payment Destination Instructions */}
               <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800 text-xs space-y-2">
                 <div className="text-[11px] font-bold text-yellow-400 uppercase tracking-wider">
-                  Dados Oficiais para Envio ({payCurrency === 'KZ' ? `${payingTheme.priceKz.toLocaleString('pt-AO')} Kz` : `${payingTheme.priceUsdt} USDT`})
+                  Dados Oficiais para Envio ({payCurrency === 'KZ' ? `${getThemePrice(payingTheme.id).priceKz.toLocaleString('pt-AO')} Kz` : `${getThemePrice(payingTheme.id).priceUsdt} USDT`})
                 </div>
 
                 {payMethod === 'MULTICAIXA_EXPRESS' && (
@@ -486,22 +488,40 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
                     </p>
                   </div>
 
-                  {/* Character / Figure Pieces Lineup */}
-                  <div className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-neutral-900/90 border border-neutral-800">
-                    <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider shrink-0">
-                      Peças:
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      {(['green', 'yellow', 'red', 'blue'] as const).map((c, idx) => (
-                        <ThemePieceFigure
-                          key={c}
-                          themeId={theme.id}
-                          color={c}
-                          expression="smiling"
-                          pieceIndex={idx}
-                          className="w-6 h-7"
-                        />
-                      ))}
+                  {/* Character / Figure Pieces Lineup & Base Capture Skills */}
+                  <div className="px-2.5 py-2 rounded-xl bg-neutral-900/90 border border-neutral-800 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider shrink-0">
+                        Peças:
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {(['green', 'yellow', 'red', 'blue'] as const).map((c, idx) => (
+                          <ThemePieceFigure
+                            key={c}
+                            themeId={theme.id}
+                            color={c}
+                            expression="smiling"
+                            pieceIndex={idx}
+                            className="w-6 h-7"
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1 pt-1.5 border-t border-neutral-800/80 text-[10px] text-neutral-300">
+                      {(['red', 'yellow', 'green', 'blue'] as const).map((c) => {
+                        const sk = getBaseCaptureSkill(theme.id, c);
+                        return (
+                          <div key={c} className="flex items-center gap-1 truncate">
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ backgroundColor: theme.bases[c].outer }}
+                            />
+                            <span className="truncate font-semibold">
+                              {sk.emoji} {sk.name}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -511,7 +531,7 @@ export const BoardThemesModal: React.FC<BoardThemesModalProps> = ({
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-neutral-400">Desbloqueio Real:</span>
                       <span className="font-black text-yellow-400">
-                        {theme.priceKz.toLocaleString('pt-AO')} Kz · {theme.priceUsdt} USDT
+                        {getThemePrice(theme.id).priceKz.toLocaleString('pt-AO')} Kz · {getThemePrice(theme.id).priceUsdt} USDT
                       </span>
                     </div>
                   )}

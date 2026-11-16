@@ -3,6 +3,8 @@
  * Produces crisp, delightful gaming sound effects with zero external file dependencies.
  */
 
+import type { CaptureSkillKind } from './captureSkills';
+
 export type DiceSoundPreset = 'original' | 'wood' | 'casino' | 'arcade' | 'silent';
 
 export const DICE_SOUND_OPTIONS: { id: DiceSoundPreset; label: string }[] = [
@@ -260,6 +262,153 @@ export const soundManager = {
       osc.start(t);
       osc.stop(t + 0.16);
     });
+  },
+
+  // Theme & base-specific piece capture ability sound
+  playCaptureSkill(kind: CaptureSkillKind) {
+    if (isSoundMuted) return;
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    if (kind === 'fire_breath') {
+      // Filtered noise roar + low flame rumble
+      const bufSize = Math.floor(ctx.sampleRate * 0.42);
+      const buffer = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(340, now);
+      filter.frequency.exponentialRampToValueAtTime(1100, now + 0.16);
+      filter.frequency.exponentialRampToValueAtTime(260, now + 0.42);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.36, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.42);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noise.start(now);
+      return;
+    }
+
+    if (kind === 'lightning_bolt') {
+      // Sharp electric zap + thunder drop
+      [1480, 920, 1760, 620].forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = now + idx * 0.035;
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(220, t + 0.09);
+        gain.gain.setValueAtTime(0.2, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.1);
+      });
+      return;
+    }
+
+    if (kind === 'monster_fist') {
+      // Heavy seismic smash punch
+      const sub = ctx.createOscillator();
+      const subGain = ctx.createGain();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(190, now);
+      sub.frequency.exponentialRampToValueAtTime(38, now + 0.34);
+      subGain.gain.setValueAtTime(0.5, now);
+      subGain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+      sub.connect(subGain);
+      subGain.connect(ctx.destination);
+      sub.start(now);
+      sub.stop(now + 0.36);
+
+      const crack = ctx.createOscillator();
+      const crackGain = ctx.createGain();
+      crack.type = 'square';
+      crack.frequency.setValueAtTime(280, now);
+      crack.frequency.exponentialRampToValueAtTime(75, now + 0.12);
+      crackGain.gain.setValueAtTime(0.22, now);
+      crackGain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+      crack.connect(crackGain);
+      crackGain.connect(ctx.destination);
+      crack.start(now);
+      crack.stop(now + 0.13);
+      return;
+    }
+
+    if (kind === 'football_shot') {
+      // Crisp ball kick thump + stadium cheer chime
+      const kick = ctx.createOscillator();
+      const kickGain = ctx.createGain();
+      kick.type = 'sine';
+      kick.frequency.setValueAtTime(240, now);
+      kick.frequency.exponentialRampToValueAtTime(55, now + 0.14);
+      kickGain.gain.setValueAtTime(0.42, now);
+      kickGain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+      kick.connect(kickGain);
+      kickGain.connect(ctx.destination);
+      kick.start(now);
+      kick.stop(now + 0.16);
+
+      [587.33, 783.99, 1046.5].forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = now + 0.11 + idx * 0.055;
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.2, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.16);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.17);
+      });
+      return;
+    }
+
+    if (kind === 'cyber_laser') {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1600, now);
+      osc.frequency.exponentialRampToValueAtTime(180, now + 0.28);
+      gain.gain.setValueAtTime(0.24, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.29);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.3);
+      return;
+    }
+
+    if (kind === 'royal_sword' || kind === 'forest_arrows') {
+      [980, 1320, 1760].forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = now + idx * 0.05;
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 0.65, t + 0.14);
+        gain.gain.setValueAtTime(0.22, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.16);
+      });
+      return;
+    }
+
+    // graffiti_boom, scarab_swarm, or fallback
+    this.playCapture();
   },
 
   // Captured sad slide ("Não acredito!")

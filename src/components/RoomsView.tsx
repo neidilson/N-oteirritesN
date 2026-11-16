@@ -31,7 +31,9 @@ export const RoomsView: React.FC = () => {
     wsConnected,
     roomError,
     clearRoomError,
-    walletMode
+    walletMode,
+    platformConfig,
+    getThemePrice
   } = useGame();
 
   const [filterCurrency, setFilterCurrency] = useState<'ALL' | Currency>('ALL');
@@ -53,8 +55,8 @@ export const RoomsView: React.FC = () => {
   const unlockedThemes = currentUser.unlockedThemes || ['classic'];
 
   const totalPot = newRoomBet * newRoomMaxPlayers;
-  const prizePool = Math.round(totalPot * 0.75);
-  const platformFee = Math.round(totalPot * 0.25);
+  const prizePool = Math.round(totalPot * (platformConfig.winnerPercent / 100));
+  const platformFee = Math.max(0, totalPot - prizePool);
 
   const filteredRooms = rooms.filter((r) => {
     if (filterCurrency !== 'ALL' && r.currency !== filterCurrency) return false;
@@ -386,13 +388,15 @@ export const RoomsView: React.FC = () => {
                     {room.betAmount > 0 && (
                       <>
                         <div className="flex justify-between">
-                          <span className="text-yellow-400 font-semibold">Prémio Campeão (75%):</span>
+                          <span className="text-yellow-400 font-semibold">
+                            Prémio Campeão ({room.winnerPercent ?? platformConfig.winnerPercent}%):
+                          </span>
                           <span className="font-bold text-emerald-400">
                             {room.prizePool.toLocaleString('pt-AO')} {room.currency}
                           </span>
                         </div>
                         <div className="flex justify-between text-[11px] text-neutral-500">
-                          <span>Taxa da Plataforma (25%):</span>
+                          <span>Taxa da Plataforma ({room.commissionPercent ?? platformConfig.commissionPercent}%):</span>
                           <span>
                             {room.platformCommission.toLocaleString('pt-AO')} {room.currency}
                           </span>
@@ -573,7 +577,7 @@ export const RoomsView: React.FC = () => {
                             {!isUnlocked && <Lock className="w-3 h-3 text-yellow-500 shrink-0" />}
                           </div>
                           <span className="text-[10px] text-neutral-400 block truncate">
-                            {isUnlocked ? theme.badge : `${theme.priceKz.toLocaleString('pt-AO')} Kz`}
+                            {isUnlocked ? theme.badge : `${getThemePrice(theme.id).priceKz.toLocaleString('pt-AO')} Kz`}
                           </span>
                         </div>
                       </button>
@@ -640,13 +644,13 @@ export const RoomsView: React.FC = () => {
                     </span>
                   </div>
                   <div className="flex justify-between text-yellow-400">
-                    <span>Prémio do Campeão (75%):</span>
+                    <span>Prémio do Campeão ({platformConfig.winnerPercent}%):</span>
                     <span className="font-bold text-emerald-400">
                       {prizePool.toLocaleString('pt-AO')} {newRoomCurrency}
                     </span>
                   </div>
                   <div className="flex justify-between text-neutral-500 text-[11px]">
-                    <span>Comissão N (25%):</span>
+                    <span>Comissão N ({platformConfig.commissionPercent}%):</span>
                     <span>
                       {platformFee.toLocaleString('pt-AO')} {newRoomCurrency}
                     </span>

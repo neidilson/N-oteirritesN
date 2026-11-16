@@ -9,12 +9,15 @@ import {
   RankingPlayer,
   PaymentSettings,
   PlayerColor,
-  BoardThemeId
+  BoardThemeId,
+  PlatformConfig,
+  ThemePriceConfig
 } from '../types';
 import { soundManager } from '../utils/soundEffects';
 import { verifyAdminCredential } from '../utils/security';
 import { getNextPosition } from '../utils/ludoRules';
 import { BOARD_THEMES } from '../utils/boardThemes';
+import { getBaseCaptureSkill } from '../utils/captureSkills';
 
 export type ActiveTab = 'dashboard' | 'game' | 'rooms' | 'wallet' | 'ranking' | 'support' | 'admin';
 
@@ -87,6 +90,10 @@ interface GameContextType {
   // Payment Receiving Settings (Admin editable IBAN, Express, USDT)
   paymentSettings: PaymentSettings;
   updatePaymentSettings: (settings: Partial<PaymentSettings>) => void;
+  // Platform Percentages & Locked Theme Prices (Admin editable)
+  platformConfig: PlatformConfig;
+  updatePlatformConfig: (config: Partial<PlatformConfig>) => void;
+  getThemePrice: (themeId: BoardThemeId) => ThemePriceConfig;
   // Wallet Mode (Real vs Demo)
   walletMode: 'REAL' | 'DEMO';
   setWalletMode: (mode: 'REAL' | 'DEMO') => void;
@@ -145,6 +152,19 @@ export const DEFAULT_PAYMENT_SETTINGS: PaymentSettings = {
   usdtNetwork: 'TRC20',
   binancePayId: '849201948',
   bybitUid: '6291048'
+};
+
+export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
+  winnerPercent: 75,
+  commissionPercent: 25,
+  themePrices: {
+    classic: { priceKz: 0, priceUsdt: 0 },
+    kingdoms: { priceKz: 15000, priceUsdt: 16 },
+    football: { priceKz: 25000, priceUsdt: 27 },
+    future: { priceKz: 20000, priceUsdt: 22 },
+    gang: { priceKz: 18000, priceUsdt: 20 },
+    egyptian: { priceKz: 22000, priceUsdt: 24 }
+  }
 };
 
 function getSessionTabId(): string {
@@ -275,6 +295,36 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return updated;
     });
   };
+
+  const [platformConfig, setPlatformConfig] = useState<PlatformConfig>(() => {
+    try {
+      const saved = localStorage.getItem('nti_platform_config');
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<PlatformConfig>;
+        return {
+          winnerPercent: Number(parsed.winnerPercent) || DEFAULT_PLATFORM_CONFIG.winnerPercent,
+          commissionPercent: Number(parsed.commissionPercent) || DEFAULT_PLATFORM_CONFIG.commissionPercent,
+          themePrices: {
+            ...DEFAULT_PLATFORM_CONFIG.themePrices,
+            ...(parsed.themePrices || {})
+          }
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_PLATFORM_CONFIG;
+  });
+
+  const getThemePrice = useCallback((themeId: BoardThemeId): ThemePriceConfig => {
+    return (
+      platformConfig.themePrices[themeId] ||
+      DEFAULT_PLATFORM_CONFIG.themePrices[themeId] || {
+        priceKz: BOARD_THEMES[themeId]?.priceKz ?? 0,
+        priceUsdt: BOARD_THEMES[themeId]?.priceUsdt ?? 0
+      }
+    );
+  }, [platformConfig.themePrices]);
 
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
@@ -472,8 +522,9 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const connectWs = () => {
       if (isDisposed) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const originUrl = new URL(window.location.origin);
+      const protocol = originUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${originUrl.host}/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -502,6 +553,27 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         const type = String(msg.type || '');
+
+        if (type === 'platform:config') {
+          const srvCfg = msg.config as PlatformConfig | undefined;
+          if (srvCfg) {
+            const merged: PlatformConfig = {
+              winnerPercent: srvCfg.winnerPercent,
+              commissionPercent: srvCfg.commissionPercent,
+              themePrices: {
+                ...DEFAULT_PLATFORM_CONFIG.themePrices,
+                ...(srvCfg.themePrices || {})
+              }
+            };
+            setPlatformConfig(merged);
+            try {
+              localStorage.setItem('nti_platform_config', JSON.stringify(merged));
+            } catch {
+              // ignore
+            }
+          }
+          return;
+        }
 
         if (type === 'rooms:list') {
           const list = (msg.rooms as Room[]) || [];
@@ -546,7 +618,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             updatedRoom.boardState.captureEvent &&
             updatedRoom.boardState.captureEvent.text !== prevRoom?.boardState.captureEvent?.text
           ) {
-            soundManager.playCapture();
+            const roomTheme =
+              updatedRoom.boardTheme || currentUserRef.current.selectedTheme || 'classic';
+            const skill = getBaseCaptureSkill(
+              roomTheme,
+              updatedRoom.boardState.captureEvent.captorColor
+            );
+            soundManager.playCaptureSkill(skill.kind);
           }
           if (updatedRoom.chat.length > (prevRoom?.chat.length || 0)) {
             const lastMsg = updatedRoom.chat[updatedRoom.chat.length - 1];
@@ -832,7 +910,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const theme = BOARD_THEMES[params.themeId];
     if (!theme || theme.isFree) return;
     soundManager.playCoin();
-    const amount = params.currency === 'KZ' ? theme.priceKz : theme.priceUsdt;
+    const dynamicPrice = getThemePrice(params.themeId);
+    const amount = params.currency === 'KZ' ? dynamicPrice.priceKz : dynamicPrice.priceUsdt;
     const newTx: Transaction = {
       id: `tx_theme_${Date.now()}`,
       userId: currentUser.id,
@@ -1279,6 +1358,39 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         lockAdmin,
         paymentSettings,
         updatePaymentSettings,
+        platformConfig,
+        updatePlatformConfig: (incoming: Partial<PlatformConfig>) => {
+          soundManager.playCoin();
+          setPlatformConfig(prev => {
+            let winnerPct =
+              incoming.winnerPercent !== undefined
+                ? Math.min(99, Math.max(1, Math.round(incoming.winnerPercent)))
+                : prev.winnerPercent;
+            let commPct =
+              incoming.commissionPercent !== undefined && incoming.winnerPercent === undefined
+                ? Math.min(99, Math.max(1, Math.round(incoming.commissionPercent)))
+                : 100 - winnerPct;
+            if (incoming.winnerPercent === undefined && incoming.commissionPercent !== undefined) {
+              winnerPct = 100 - commPct;
+            }
+            const next: PlatformConfig = {
+              winnerPercent: winnerPct,
+              commissionPercent: commPct,
+              themePrices: {
+                ...prev.themePrices,
+                ...(incoming.themePrices || {})
+              }
+            };
+            try {
+              localStorage.setItem('nti_platform_config', JSON.stringify(next));
+            } catch {
+              // ignore
+            }
+            sendWs({ type: 'admin:update_platform_config', config: next });
+            return next;
+          });
+        },
+        getThemePrice,
         walletMode,
         setWalletMode,
         updateProfile,

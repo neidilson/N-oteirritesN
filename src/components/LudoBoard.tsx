@@ -33,6 +33,8 @@ import { AvatarMonster, MonsterAuraKind } from './DiceMonsterAura';
 import { BOARD_THEMES } from '../utils/boardThemes';
 import { BoardThemesModal } from './BoardThemesModal';
 import { ThemePieceFigure } from './ThemePieceFigure';
+import { PieceCaptureSkillFX } from './PieceCaptureSkillFX';
+import { getBaseCaptureSkill, CaptureSkillDef } from '../utils/captureSkills';
 import { soundManager, DICE_SOUND_OPTIONS, DiceSoundPreset } from '../utils/soundEffects';
 
 function nearestCongruentAngle(current: number, targetBase: number, angularVel: number): number {
@@ -43,11 +45,14 @@ function nearestCongruentAngle(current: number, targetBase: number, angularVel: 
 }
 
 function forwardCongruentAngle(current: number, targetBase: number, angularVel: number): number {
+  if (Math.abs(angularVel) < 75) {
+    return nearestCongruentAngle(current, targetBase, angularVel);
+  }
   let diff = ((targetBase - current) % 360 + 540) % 360 - 180;
   if (angularVel >= 0) {
-    while (diff < 35) diff += 360;
+    while (diff < 0) diff += 360;
   } else {
-    while (diff > -35) diff -= 360;
+    while (diff > 0) diff -= 360;
   }
   return current + diff;
 }
@@ -262,7 +267,8 @@ export const LudoBoard: React.FC = () => {
     movePiece,
     respondSurrenderOffer,
     sendChatMessage,
-    leaveCurrentRoom
+    leaveCurrentRoom,
+    platformConfig
   } = useGame();
 
   const [chatInput, setChatInput] = useState('');
@@ -284,12 +290,19 @@ export const LudoBoard: React.FC = () => {
   const [playerMonsters, setPlayerMonsters] = useState<
     Partial<Record<PlayerColor, { key: number; kind: MonsterAuraKind; label: string }>>
   >({});
+  const [activeCaptureSkill, setActiveCaptureSkill] = useState<{
+    key: number;
+    captorColor: PlayerColor;
+    position: number;
+    skill: CaptureSkillDef;
+  } | null>(null);
 
   const lastAuraSignatureRef = useRef<string>('');
   const lastCaptureSigRef = useRef<string>('');
   const lastWinnerSigRef = useRef<string>('');
   const prevPiecePosRef = useRef<Map<string, number>>(new Map());
   const monsterTimersRef = useRef<Partial<Record<PlayerColor, ReturnType<typeof setTimeout>>>>({});
+  const skillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [diceRotation, setDiceRotation] = useState<{ x: number; y: number; z: number }>(() => ({
     x: FACE_ORIENTATIONS[1].rx,
     y: FACE_ORIENTATIONS[1].ry,
@@ -356,7 +369,7 @@ export const LudoBoard: React.FC = () => {
     }
     if (diceShadowRef.current) {
       const shadowScale = 1 + Math.min(0.55, elevation * 0.014);
-      const shadowOpacity = Math.max(0.16, 0.58 - elevation * 0.008);
+      const shadowOpacity = Math.max(0.16, 0.52 - elevation * 0.008);
       const shadowOffsetX = elevation * 0.28;
       const shadowOffsetY = elevation * 0.48;
       diceShadowRef.current.style.opacity = shadowOpacity.toFixed(3);
@@ -419,36 +432,40 @@ export const LudoBoard: React.FC = () => {
 
     const speed = Math.hypot(vx, vy);
     if (mode === 'click') {
-      const toCenterAngle = Math.atan2(50 - y, 50 - x) + (Math.random() - 0.5) * 1.4;
-      const clickSpeed = 240 + Math.random() * 80;
-      vx = Math.cos(toCenterAngle) * clickSpeed;
-      vy = Math.sin(toCenterAngle) * clickSpeed;
-    } else if (speed < 360) {
+      const distFromCenter = Math.hypot(50 - x, 50 - y);
+      const rollAngle =
+        distFromCenter < 8
+          ? Math.random() * Math.PI * 2
+          : Math.atan2(50 - y, 50 - x) + (Math.random() - 0.5) * 1.8;
+      const clickSpeed = 270 + Math.random() * 110;
+      vx = Math.cos(rollAngle) * clickSpeed;
+      vy = Math.sin(rollAngle) * clickSpeed;
+    } else if (speed < 340) {
       const angle = speed > 5 ? Math.atan2(vy, vx) : Math.random() * Math.PI * 2;
-      vx = Math.cos(angle) * 400;
-      vy = Math.sin(angle) * 400;
+      vx = Math.cos(angle) * 380;
+      vy = Math.sin(angle) * 380;
     } else if (speed > 720) {
       const scale = 720 / speed;
       vx *= scale;
       vy *= scale;
     }
 
-    let z = mode === 'click' ? 8 : 22;
-    let vz = mode === 'click' ? 255 : 220;
+    let z = mode === 'click' ? 6 : 22;
+    let vz = mode === 'click' ? 275 : 220;
     let rx = diceRotRef.current.x;
     let ry = diceRotRef.current.y;
     let rz = diceRotRef.current.z;
 
     // Couple angular roll rate naturally to travel direction & speed (zero slipping/desync)
-    let vrx = -vy * 10.6 + (Math.random() - 0.5) * 90;
-    let vry = vx * 10.6 + (Math.random() - 0.5) * 90;
-    let vrz = (vx - vy) * 1.6;
+    let vrx = -vy * 9.5 + (Math.random() - 0.5) * 70;
+    let vry = vx * 9.5 + (Math.random() - 0.5) * 70;
+    let vrz = (vx - vy) * 1.4;
 
     const MIN_WALL = 8.5;
     const MAX_WALL = 91.5;
-    const GRAVITY = 1650;
-    const MIN_ROLL_MS = mode === 'click' ? 190 : 220;
-    const LAND_DURATION = 210;
+    const GRAVITY = 1580;
+    const MIN_ROLL_MS = mode === 'click' ? 380 : 440;
+    const LAND_DURATION = 240;
     const startTime = performance.now();
     let lastTime = startTime;
     let lastWallSoundAt = startTime;
@@ -483,32 +500,32 @@ export const LudoBoard: React.FC = () => {
         if (x < MIN_WALL) {
           x = MIN_WALL;
           vx = Math.abs(vx) * 0.78;
-          vry = vx * 10.6;
-          vrz += (Math.random() - 0.5) * 180;
-          vz = Math.max(vz, 90);
+          vry = vx * 9.5;
+          vrz += (Math.random() - 0.5) * 160;
+          vz = Math.max(vz, 95);
           hitWall = true;
         } else if (x > MAX_WALL) {
           x = MAX_WALL;
           vx = -Math.abs(vx) * 0.78;
-          vry = vx * 10.6;
-          vrz += (Math.random() - 0.5) * 180;
-          vz = Math.max(vz, 90);
+          vry = vx * 9.5;
+          vrz += (Math.random() - 0.5) * 160;
+          vz = Math.max(vz, 95);
           hitWall = true;
         }
 
         if (y < MIN_WALL) {
           y = MIN_WALL;
           vy = Math.abs(vy) * 0.78;
-          vrx = -vy * 10.6;
-          vrz += (Math.random() - 0.5) * 180;
-          vz = Math.max(vz, 90);
+          vrx = -vy * 9.5;
+          vrz += (Math.random() - 0.5) * 160;
+          vz = Math.max(vz, 95);
           hitWall = true;
         } else if (y > MAX_WALL) {
           y = MAX_WALL;
           vy = -Math.abs(vy) * 0.78;
-          vrx = -vy * 10.6;
-          vrz += (Math.random() - 0.5) * 180;
-          vz = Math.max(vz, 90);
+          vrx = -vy * 9.5;
+          vrz += (Math.random() - 0.5) * 160;
+          vz = Math.max(vz, 95);
           hitWall = true;
         }
 
@@ -522,21 +539,21 @@ export const LudoBoard: React.FC = () => {
         if (z <= 0) {
           z = 0;
           if (!serverReady && elapsed < MIN_ROLL_MS) {
-            vz = Math.max(Math.abs(vz) * 0.52, 85);
-          } else if (Math.abs(vz) > 48) {
-            vz = -vz * 0.45;
+            vz = Math.max(Math.abs(vz) * 0.54, 95);
+          } else if (Math.abs(vz) > 45) {
+            vz = -vz * 0.46;
           } else {
             vz = 0;
           }
         }
 
-        // When sliding on board (z === 0), gradually couple spin cleanly to board velocity
-        const friction = z > 0 ? Math.pow(0.992, dt * 60) : Math.pow(0.955, dt * 60);
+        // When sliding on board (z === 0), smoothly couple spin to board velocity
+        const friction = z > 0 ? Math.pow(0.992, dt * 60) : Math.pow(0.958, dt * 60);
         vx *= friction;
         vy *= friction;
         if (z === 0) {
-          vrx = vrx * 0.4 + (-vy * 10.6) * 0.6;
-          vry = vry * 0.4 + (vx * 10.6) * 0.6;
+          vrx = vrx * 0.42 + (-vy * 9.5) * 0.58;
+          vry = vry * 0.42 + (vx * 9.5) * 0.58;
           vrz *= Math.pow(0.9, dt * 60);
         }
 
@@ -708,7 +725,7 @@ export const LudoBoard: React.FC = () => {
     isDraggingDice
   ]);
 
-  // 2. Manifest Monsters on Side Avatar Cards when an opponent piece is captured
+  // 2. Manifest Theme Combat Skill on Board + Monsters on Side Avatar Cards when an opponent piece is captured
   useEffect(() => {
     if (!selectedRoom) return;
     const cap = selectedRoom.boardState.captureEvent;
@@ -718,9 +735,29 @@ export const LudoBoard: React.FC = () => {
     if (capSig === lastCaptureSigRef.current) return;
     lastCaptureSigRef.current = capSig;
 
-    triggerPlayerMonster(cap.captorColor, 'capture', 'DERRUBOU! 💥');
+    const unlocked = currentUser.unlockedThemes || ['classic'];
+    const reqTheme = selectedRoom.boardTheme || currentUser.selectedTheme || 'classic';
+    const resolvedTheme: BoardThemeId = unlocked.includes(reqTheme)
+      ? reqTheme
+      : currentUser.selectedTheme && unlocked.includes(currentUser.selectedTheme)
+      ? currentUser.selectedTheme
+      : 'classic';
+
+    const skill = getBaseCaptureSkill(resolvedTheme, cap.captorColor);
+    if (skillTimerRef.current) clearTimeout(skillTimerRef.current);
+    setActiveCaptureSkill({
+      key: Date.now() + Math.random(),
+      captorColor: cap.captorColor,
+      position: cap.position,
+      skill
+    });
+    skillTimerRef.current = setTimeout(() => {
+      setActiveCaptureSkill(null);
+    }, 1250);
+
+    triggerPlayerMonster(cap.captorColor, 'capture', skill.shortLabel);
     triggerPlayerMonster(cap.capturedColor, 'knocked', 'COMIDO! 💀');
-  }, [selectedRoom?.boardState.captureEvent]);
+  }, [selectedRoom?.boardState.captureEvent, selectedRoom?.boardTheme, currentUser.selectedTheme, currentUser.unlockedThemes]);
 
   // 3. Manifest Goal / Victory Monster on Side Avatar Card when a piece reaches 200 or player wins
   useEffect(() => {
@@ -765,6 +802,7 @@ export const LudoBoard: React.FC = () => {
       Object.values(monsterTimersRef.current).forEach(t => {
         if (t) clearTimeout(t);
       });
+      if (skillTimerRef.current) clearTimeout(skillTimerRef.current);
     };
   }, []);
 
@@ -1010,9 +1048,9 @@ export const LudoBoard: React.FC = () => {
             <div className="flex items-center gap-2 text-xs text-neutral-400 mt-0.5">
               <span>Entrada: <b className="text-white">{betAmount.toLocaleString('pt-AO')} {currency}</b></span>
               <span>·</span>
-              <span className="text-yellow-400">Prémio (75%): <b className="font-bold">{prizePool.toLocaleString('pt-AO')} {currency}</b></span>
+              <span className="text-yellow-400">Prémio ({selectedRoom.winnerPercent ?? platformConfig.winnerPercent}%): <b className="font-bold">{prizePool.toLocaleString('pt-AO')} {currency}</b></span>
               <span>·</span>
-              <span className="text-neutral-500">Taxa N (25%): {platformCommission.toLocaleString('pt-AO')} {currency}</span>
+              <span className="text-neutral-500">Taxa N ({selectedRoom.commissionPercent ?? platformConfig.commissionPercent}%): {platformCommission.toLocaleString('pt-AO')} {currency}</span>
             </div>
           </div>
         </div>
@@ -1291,7 +1329,15 @@ export const LudoBoard: React.FC = () => {
                           )}
 
                           {/* 2D Thematic Character / Figure Piece */}
-                          <div className="relative flex items-center justify-center -translate-y-0.5">
+                          <div
+                            className={`relative flex items-center justify-center -translate-y-0.5 ${
+                              activeCaptureSkill &&
+                              activeCaptureSkill.captorColor === p.color &&
+                              activeCaptureSkill.position === piece.position
+                                ? 'animate-piece-attack'
+                                : ''
+                            }`}
+                          >
                             <ThemePieceFigure
                               themeId={activeThemeId}
                               color={p.color}
@@ -1314,6 +1360,15 @@ export const LudoBoard: React.FC = () => {
                   })
                 );
               })()}
+
+              {/* Theme & Base Capture Combat Skill VFX (Fogo, Raio, Punho de Monstro, Bola de Futebol, etc.) */}
+              {activeCaptureSkill && (
+                <PieceCaptureSkillFX
+                  key={activeCaptureSkill.key}
+                  position={activeCaptureSkill.position}
+                  skill={activeCaptureSkill.skill}
+                />
+              )}
 
               {/* Clean 15x15 board & pure 3D dice (monsters appear on the outer player avatar cards) */}
 
@@ -1711,12 +1766,12 @@ export const LudoBoard: React.FC = () => {
                 <span className="font-bold text-white">{(betAmount * selectedRoom.maxPlayers).toLocaleString('pt-AO')} {currency}</span>
               </div>
               <div className="flex justify-between text-xs text-neutral-400">
-                <span>Comissão da Plataforma (25%):</span>
+                <span>Comissão da Plataforma ({selectedRoom.commissionPercent ?? platformConfig.commissionPercent}%):</span>
                 <span className="font-bold text-neutral-400">{platformCommission.toLocaleString('pt-AO')} {currency}</span>
               </div>
               <div className="h-[1px] bg-neutral-800 my-1" />
               <div className="flex justify-between text-sm font-bold">
-                <span className="text-yellow-400">Prémio Final do Vencedor (75%):</span>
+                <span className="text-yellow-400">Prémio Final do Vencedor ({selectedRoom.winnerPercent ?? platformConfig.winnerPercent}%):</span>
                 <span className="text-emerald-400">{prizePool.toLocaleString('pt-AO')} {currency}</span>
               </div>
             </div>

@@ -23,7 +23,8 @@ export const WalletView: React.FC = () => {
     exchangeRate,
     requestDeposit,
     requestWithdrawal,
-    paymentSettings
+    paymentSettings,
+    platformConfig
   } = useGame();
 
   const [walletTab, setWalletTab] = useState<'overview' | 'deposit' | 'withdraw' | 'history'>('overview');
@@ -398,7 +399,9 @@ export const WalletView: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-neutral-400">Distribuição Padrão da Mesa:</span>
-                  <span className="font-bold text-yellow-400">75% Prémios / 25% Taxa N</span>
+                  <span className="font-bold text-yellow-400">
+                    {platformConfig.winnerPercent}% Prémios / {platformConfig.commissionPercent}% Taxa N
+                  </span>
                 </div>
               </div>
             </div>
