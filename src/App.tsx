@@ -22,8 +22,12 @@ function MainLayout() {
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#0c0d10] text-neutral-100 flex flex-col items-center justify-center p-6">
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-red-600 via-neutral-900 to-black border-2 border-yellow-500/80 flex items-center justify-center shadow-lg shadow-red-950/60 mb-4 animate-pulse">
-          <span className="font-black text-3xl text-yellow-400">N</span>
+        <div className="w-16 h-16 rounded-2xl overflow-hidden bg-[#0a0a0f] border-2 border-yellow-500/80 shadow-lg shadow-red-950/60 mb-4 animate-pulse">
+          <img
+            src="/assets/aistudio/image_e1d79dfc.png"
+            alt="N – Não Te Irrites"
+            className="w-full h-full object-cover"
+          />
         </div>
         <p className="text-xs font-bold uppercase tracking-widest text-yellow-400">
           A carregar a sua conta...
@@ -56,8 +60,12 @@ function MainLayout() {
       <footer className="border-t border-neutral-800/80 bg-neutral-950/90 py-8 px-4 text-xs text-neutral-500">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-red-600 via-neutral-900 to-black border border-yellow-500/40 flex items-center justify-center font-black text-sm text-yellow-400">
-              N
+            <div className="w-8 h-8 rounded-lg overflow-hidden bg-[#0a0a0f] border border-yellow-500/40 shrink-0">
+              <img
+                src="/assets/aistudio/image_e1d79dfc.png"
+                alt="N – Não Te Irrites"
+                className="w-full h-full object-cover"
+              />
             </div>
             <div>
               <span className="font-bold text-white block">N – NÃO TE IRRITES</span>

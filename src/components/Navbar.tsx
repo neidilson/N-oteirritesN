@@ -3,6 +3,7 @@ import { useGame } from '../context/GameContext';
 import { Volume2, VolumeX, Shield, Wallet, Trophy, Swords, Home, HelpCircle, Lock, Unlock, LogOut, User, Sparkles, Gamepad2 } from 'lucide-react';
 import { AdminPinModal } from './AdminPinModal';
 import { EditProfileModal } from './EditProfileModal';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export const Navbar: React.FC = () => {
   const {
@@ -37,10 +38,12 @@ export const Navbar: React.FC = () => {
             onClick={() => setActiveTab('dashboard')}
             className="flex items-center gap-3 cursor-pointer group shrink-0"
           >
-            <div className="relative w-10 h-10 rounded-xl overflow-hidden border border-yellow-500/40 shadow-lg shadow-red-950/50 flex items-center justify-center bg-gradient-to-br from-red-700 via-neutral-900 to-black">
-              <span className="font-extrabold text-2xl tracking-tighter text-transparent bg-clip-text bg-gradient-to-t from-yellow-400 via-amber-200 to-white">
-                N
-              </span>
+            <div className="relative w-10 h-10 rounded-xl overflow-hidden border border-yellow-500/40 shadow-lg shadow-red-950/50 bg-[#0a0a0f] shrink-0">
+              <img
+                src="/assets/aistudio/image_e1d79dfc.png"
+                alt="N – Não Te Irrites"
+                className="w-full h-full object-cover"
+              />
               <div className="absolute inset-0 bg-yellow-500/10 pointer-events-none group-hover:bg-yellow-500/20 transition-colors" />
             </div>
             <div>
@@ -169,6 +172,8 @@ export const Navbar: React.FC = () => {
             >
               {isMuted ? <VolumeX className="w-4 h-4 text-neutral-500" /> : <Volume2 className="w-4 h-4 text-yellow-400" />}
             </button>
+
+            <PWAInstallButton />
 
             {/* Admin Enter / Exit buttons */}
             {isAdminUnlocked ? (

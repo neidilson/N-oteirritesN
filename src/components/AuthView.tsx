@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useGame } from '../context/GameContext';
 import { ShieldCheck, Shield, Mail, Lock, User, ArrowRight, KeyRound, Users } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export const AuthView: React.FC = () => {
   const { register, login, loginAdmin, pendingInviteCode } = useGame();
@@ -130,8 +131,12 @@ export const AuthView: React.FC = () => {
       {/* Top Header Bar */}
       <header className="max-w-6xl mx-auto w-full flex items-center justify-between py-2">
         <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-red-600 via-neutral-900 to-black border-2 border-yellow-500/80 flex items-center justify-center shadow-lg shadow-red-950/60">
-            <span className="font-black text-2xl text-yellow-400">N</span>
+          <div className="w-11 h-11 rounded-2xl overflow-hidden bg-[#0a0a0f] border-2 border-yellow-500/70 shadow-lg shadow-red-950/60 shrink-0">
+            <img
+              src="/assets/aistudio/image_e1d79dfc.png"
+              alt="N – Não Te Irrites"
+              className="w-full h-full object-cover"
+            />
           </div>
           <div>
             <span className="text-xl font-black text-white tracking-tight block leading-tight">
@@ -144,6 +149,7 @@ export const AuthView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <PWAInstallButton />
           {mode !== 'admin' ? (
             <button
               onClick={() => setMode('admin')}

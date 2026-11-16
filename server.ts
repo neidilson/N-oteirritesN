@@ -2183,9 +2183,28 @@ async function startServer() {
   }, 1000);
 
   const distPath = path.join(__dirname, 'dist');
+  const publicPath = path.join(__dirname, 'public');
   const isProduction =
     process.env.NODE_ENV === 'production' ||
     (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distPath));
+
+  const pwaAssetBase = isProduction && fs.existsSync(distPath) ? distPath : publicPath;
+
+  app.get('/manifest.webmanifest', (_req, res, next) => {
+    const manifestFile = path.join(pwaAssetBase, 'manifest.webmanifest');
+    if (!fs.existsSync(manifestFile)) return next();
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(manifestFile);
+  });
+
+  app.get('/sw.js', (_req, res, next) => {
+    const swFile = path.join(pwaAssetBase, 'sw.js');
+    if (!fs.existsSync(swFile)) return next();
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.sendFile(swFile);
+  });
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -2195,7 +2214,19 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('manifest.webmanifest')) {
+            res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (filePath.endsWith('sw.js')) {
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        }
+      })
+    );
     app.use('/api', (_req, res) => {
       res.status(404).json({ error: 'Not found' });
     });

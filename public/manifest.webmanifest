@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "N – Não Te Irrites",
+  "short_name": "Não Te Irrites",
+  "description": "Plataforma angolana de jogos online multiplayer com tabuleiro Não Te Irrites (Ludo), carteira multimoeda KZ & USDT e ranking em tempo real.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "lang": "pt-AO",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
