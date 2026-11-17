@@ -150,7 +150,8 @@ export type TransactionType =
   | 'BET_ENTRY'
   | 'BET_WIN'
   | 'COMMISSION'
-  | 'THEME_UNLOCK';
+  | 'THEME_UNLOCK'
+  | 'bonus';
 
 export type TransactionStatus =
   | 'Aguardando pagamento'
@@ -186,6 +187,8 @@ export interface Transaction {
   notes?: string;
   themeId?: BoardThemeId;
   themeName?: string;
+  reason?: string;
+  grantedBy?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -306,5 +309,30 @@ export interface AdminOverview {
   transactions: Transaction[];
   supportTickets: SupportTicket[];
   matchHistory: MatchHistoryEntry[];
+}
+
+export type NotificationType = 'bonus' | 'deposit' | 'withdraw' | 'invite' | 'system';
+
+export interface AppNotification {
+  id: string;
+  userId: string;
+  title: string;
+  body: string;
+  type: NotificationType;
+  read: boolean;
+  createdAt: string;
+}
+
+export interface PushSubscriptionKeys {
+  p256dh: string;
+  auth: string;
+}
+
+export interface PushSubscriptionRecord {
+  id: string;
+  userId: string;
+  endpoint: string;
+  keys: PushSubscriptionKeys;
+  createdAt: string;
 }
 

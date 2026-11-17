@@ -10,7 +10,10 @@ import {
   Check,
   Sparkles,
   Gamepad2,
-  ShieldCheck
+  ShieldCheck,
+  Bell,
+  BellOff,
+  Smartphone
 } from 'lucide-react';
 
 export const GAME_AVATARS = [
@@ -94,7 +97,17 @@ interface EditProfileModalProps {
 }
 
 export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onClose }) => {
-  const { currentUser, updateProfile } = useGame();
+  const {
+    currentUser,
+    updateProfile,
+    isPushSubscribed,
+    pushBusy,
+    pushError,
+    pushAvailableOnServer,
+    isIOSDevice,
+    isStandalonePWA,
+    togglePushNotifications
+  } = useGame();
 
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone.replace('+244', '').trim());
@@ -313,6 +326,64 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
               <span className="text-[10px] text-neutral-500 mt-1 block">
                 A palavra-passe é guardada com encriptação segura no servidor.
               </span>
+            </div>
+
+            {/* Notificações Push (PWA) */}
+            <div className="p-4 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center border ${
+                    isPushSubscribed
+                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
+                      : 'bg-neutral-900 border-neutral-700 text-neutral-400'
+                  }`}>
+                    {isPushSubscribed ? <Bell className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-white block">Ativar notificações</span>
+                    <span className="text-[10px] text-neutral-400 block">
+                      Receba avisos de bónus, depósitos, levantamentos e convites de sala.
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isPushSubscribed}
+                  disabled={pushBusy}
+                  onClick={() => void togglePushNotifications(!isPushSubscribed)}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none disabled:opacity-50 ${
+                    isPushSubscribed ? 'bg-emerald-500' : 'bg-neutral-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                      isPushSubscribed ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {isIOSDevice && !isStandalonePWA && (
+                <div className="p-2.5 rounded-xl bg-amber-950/40 border border-yellow-500/40 text-[11px] text-yellow-200 flex items-start gap-2">
+                  <Smartphone className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+                  <span>
+                    No iPhone/iPad, para ativar notificações instale primeiro a app no ecrã principal:{' '}
+                    <b>Partilhar → Adicionar ao ecrã principal</b>.
+                  </span>
+                </div>
+              )}
+
+              {!pushAvailableOnServer && !pushError && (
+                <p className="text-[10px] text-neutral-500">
+                  Web Push aguarda configuração das chaves VAPID no servidor.
+                </p>
+              )}
+
+              {pushError && (
+                <p className="text-[11px] text-red-400 font-semibold">{pushError}</p>
+              )}
             </div>
           </div>
 

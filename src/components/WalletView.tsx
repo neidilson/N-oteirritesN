@@ -883,11 +883,20 @@ export const WalletView: React.FC = () => {
                         ? 'Entrada em Mesa'
                         : tx.type === 'THEME_UNLOCK'
                         ? `Tabuleiro (${tx.themeName || tx.themeId || 'Premium'})`
+                        : tx.type === 'bonus'
+                        ? 'Bónus Recebido'
                         : 'Comissão';
                     return (
                       <tr key={tx.id} className="hover:bg-neutral-800/40">
                         <td className="p-3 text-neutral-400 whitespace-nowrap">{tx.createdAt}</td>
-                        <td className="p-3 font-semibold text-white">{typeLabel}</td>
+                        <td className="p-3 font-semibold text-white">
+                          <span className="block">{typeLabel}</span>
+                          {tx.type === 'bonus' && (tx.reason || tx.notes) && (
+                            <span className="text-[10px] text-yellow-400 font-normal block">
+                              {tx.reason || tx.notes}
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 text-neutral-300 font-mono text-[11px]">{tx.method}</td>
                         <td className="p-3 font-mono text-neutral-400 text-[11px]">{tx.reference}</td>
                         <td className="p-3 font-bold tabular-nums whitespace-nowrap">

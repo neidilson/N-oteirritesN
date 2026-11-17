@@ -268,6 +268,7 @@ export const LudoBoard: React.FC = () => {
     respondSurrenderOffer,
     sendChatMessage,
     leaveCurrentRoom,
+    invitePlayerToRoom,
     platformConfig
   } = useGame();
 
@@ -276,6 +277,9 @@ export const LudoBoard: React.FC = () => {
   const [copiedCode, setCopiedCode] = useState<'code' | 'link' | null>(null);
   const [showThemesModal, setShowThemesModal] = useState(false);
   const [diceSound, setDiceSound] = useState<DiceSoundPreset>(() => soundManager.getDiceSoundPreset());
+  const [invitePlayerQuery, setInvitePlayerQuery] = useState('');
+  const [inviteSending, setInviteSending] = useState(false);
+  const [inviteFeedback, setInviteFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Board reference and 60fps 3D rigid-body dice physics state (direct-DOM GPU transforms)
   const boardRef = useRef<HTMLDivElement>(null);
@@ -1476,6 +1480,50 @@ export const LudoBoard: React.FC = () => {
                       >
                         WhatsApp
                       </a>
+                    </div>
+
+                    {/* Direct In-App / Push Invite */}
+                    <div className="pt-1 border-t border-neutral-800/80 text-left space-y-1.5">
+                      <span className="text-[11px] font-bold text-neutral-300 block">
+                        Convidar Jogador na App (Notificação + Push):
+                      </span>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={invitePlayerQuery}
+                          onChange={(e) => setInvitePlayerQuery(e.target.value)}
+                          placeholder="Nome ou +244 telemóvel..."
+                          className="flex-1 min-w-0 bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-yellow-500"
+                        />
+                        <button
+                          type="button"
+                          disabled={inviteSending || !invitePlayerQuery.trim()}
+                          onClick={async () => {
+                            if (inviteSending || !invitePlayerQuery.trim()) return;
+                            setInviteSending(true);
+                            setInviteFeedback(null);
+                            const res = await invitePlayerToRoom(invitePlayerQuery);
+                            setInviteSending(false);
+                            if (!res.ok) {
+                              setInviteFeedback({ ok: false, text: res.error || 'Erro ao convidar.' });
+                            } else {
+                              setInviteFeedback({
+                                ok: true,
+                                text: `Convite enviado para ${res.invitedUserName || invitePlayerQuery}!`
+                              });
+                              setInvitePlayerQuery('');
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-yellow-500 hover:bg-yellow-400 text-black text-xs font-black shrink-0 disabled:opacity-50"
+                        >
+                          {inviteSending ? '...' : 'Convidar'}
+                        </button>
+                      </div>
+                      {inviteFeedback && (
+                        <p className={`text-[10px] font-semibold ${inviteFeedback.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {inviteFeedback.text}
+                        </p>
+                      )}
                     </div>
 
                     {/* Base Color Chooser */}

@@ -13,7 +13,8 @@ import {
   PlatformConfig,
   ThemePriceConfig,
   MatchHistoryEntry,
-  AdminOverview
+  AdminOverview,
+  AppNotification
 } from '../types';
 import { soundManager } from '../utils/soundEffects';
 import { getNextPosition } from '../utils/ludoRules';
@@ -42,6 +43,9 @@ interface GameContextType {
   pendingInviteCode: string | null;
   transactions: Transaction[];
   matchHistory: MatchHistoryEntry[];
+  notifications: AppNotification[];
+  unreadNotificationsCount: number;
+  markNotificationsRead: (ids?: string[]) => Promise<void>;
   supportTickets: SupportTicket[];
   rankingList: RankingPlayer[];
   refreshRanking: () => Promise<void>;
@@ -68,6 +72,7 @@ interface GameContextType {
   }) => string;
   joinRoom: (roomId: string) => void;
   joinRoomByCode: (code: string) => void;
+  invitePlayerToRoom: (query: string) => Promise<ActionResult & { invitedUserName?: string }>;
   selectBaseColor: (color: PlayerColor) => void;
   selectBoardTheme: (themeId: BoardThemeId) => void;
   requestThemeUnlock: (params: {
@@ -110,6 +115,12 @@ interface GameContextType {
   adminRejectDeposit: (txId: string) => Promise<ActionResult>;
   adminApproveWithdrawal: (txId: string) => Promise<ActionResult>;
   adminRejectWithdrawal: (txId: string) => Promise<ActionResult>;
+  adminGrantBonus: (params: {
+    userId: string;
+    currency: Currency;
+    amount: number;
+    reason?: string;
+  }) => Promise<ActionResult>;
   adminReplySupport: (ticketId: string, text: string) => Promise<ActionResult>;
   adminToggleUserSuspension: (userId: string) => Promise<ActionResult>;
   // Payment Receiving Settings (Admin editable IBAN, Express, USDT)
@@ -124,6 +135,14 @@ interface GameContextType {
   setWalletMode: (mode: 'REAL' | 'DEMO') => void;
   // Profile Editing
   updateProfile: (data: { name?: string; phone?: string; password?: string; avatar?: string }) => Promise<ActionResult>;
+  // Web Push (PWA VAPID)
+  pushAvailableOnServer: boolean;
+  isPushSubscribed: boolean;
+  pushBusy: boolean;
+  pushError: string | null;
+  isIOSDevice: boolean;
+  isStandalonePWA: boolean;
+  togglePushNotifications: (enable: boolean) => Promise<ActionResult>;
   // Admin PIN Protection
   isAdminUnlocked: boolean;
   unlockAdmin: (pin: string) => Promise<boolean>;
@@ -257,7 +276,17 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [currentUser, setCurrentUser] = useState<User>(GUEST_USER);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [authLoading, setAuthLoading] = useState<boolean>(() => Boolean(readStoredToken(TOKEN_STORAGE_KEY) || readStoredToken(ADMIN_TOKEN_STORAGE_KEY)));
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    try {
+      const tabParam = new URLSearchParams(window.location.search).get('tab');
+      if (tabParam === 'wallet' || tabParam === 'rooms' || tabParam === 'ranking' || tabParam === 'support') {
+        return tabParam;
+      }
+    } catch {
+      // ignore
+    }
+    return 'dashboard';
+  });
   const [isMuted, setIsMuted] = useState(false);
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => Boolean(readStoredToken(ADMIN_TOKEN_STORAGE_KEY)));
 
@@ -282,9 +311,25 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [platformConfig, setPlatformConfig] = useState<PlatformConfig>(DEFAULT_PLATFORM_CONFIG);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [matchHistory, setMatchHistory] = useState<MatchHistoryEntry[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
   const [rankingList, setRankingList] = useState<RankingPlayer[]>([]);
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
+
+  const [pushVapidPublicKey, setPushVapidPublicKey] = useState<string | null>(null);
+  const [pushAvailableOnServer, setPushAvailableOnServer] = useState<boolean>(false);
+  const [isPushSubscribed, setIsPushSubscribed] = useState<boolean>(false);
+  const [pushBusy, setPushBusy] = useState<boolean>(false);
+  const [pushError, setPushError] = useState<string | null>(null);
+
+  const isIOSDevice =
+    typeof navigator !== 'undefined' &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+  const isStandalonePWA =
+    typeof window !== 'undefined' &&
+    (Boolean(window.matchMedia?.('(display-mode: standalone)').matches) ||
+      Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone));
 
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
@@ -430,6 +475,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           user: User;
           transactions: Transaction[];
           matchHistory: MatchHistoryEntry[];
+          notifications?: AppNotification[];
           supportTickets: SupportTicket[];
           paymentSettings: PaymentSettings;
           platformConfig: PlatformConfig;
@@ -442,6 +488,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
           setTransactions(meRes.data.transactions || []);
           setMatchHistory(meRes.data.matchHistory || []);
+          setNotifications(meRes.data.notifications || []);
           setSupportTickets(meRes.data.supportTickets || []);
           if (meRes.data.paymentSettings) setPaymentSettings(meRes.data.paymentSettings);
           if (meRes.data.platformConfig) applyNormalizedPlatformConfig(meRes.data.platformConfig);
@@ -476,6 +523,38 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       cancelled = true;
     };
   }, [applyNormalizedPlatformConfig]);
+
+  // Read-only check for VAPID availability & existing push subscription (never requests permission!)
+  useEffect(() => {
+    let cancelled = false;
+    const checkPushState = async () => {
+      const vapidRes = await apiJson<{ enabled: boolean; publicKey: string | null }>('/api/push/vapid-public-key');
+      if (!cancelled && vapidRes.ok) {
+        setPushAvailableOnServer(Boolean(vapidRes.data.enabled && vapidRes.data.publicKey));
+        setPushVapidPublicKey(vapidRes.data.publicKey || null);
+      }
+      try {
+        if (
+          typeof window !== 'undefined' &&
+          'serviceWorker' in navigator &&
+          'Notification' in window &&
+          Notification.permission === 'granted'
+        ) {
+          const reg = await navigator.serviceWorker.getRegistration('/');
+          const sub = await reg?.pushManager?.getSubscription();
+          if (!cancelled) {
+            setIsPushSubscribed(Boolean(sub));
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+    void checkPushState();
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn]);
 
   // WebSocket Real-Time Multiplayer Connection
   useEffect(() => {
@@ -527,6 +606,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           if (Array.isArray(msg.matchHistory)) {
             setMatchHistory(msg.matchHistory as MatchHistoryEntry[]);
+          }
+          if (Array.isArray(msg.notifications)) {
+            setNotifications(msg.notifications as AppNotification[]);
+          }
+          return;
+        }
+
+        if (type === 'notification:new') {
+          const incoming = msg.notification as AppNotification | undefined;
+          if (incoming && incoming.id) {
+            soundManager.playCoin();
+            setNotifications((prev) => (prev.some((n) => n.id === incoming.id) ? prev : [incoming, ...prev]));
           }
           return;
         }
@@ -721,6 +812,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       token: string;
       transactions: Transaction[];
       matchHistory: MatchHistoryEntry[];
+      notifications?: AppNotification[];
       supportTickets: SupportTicket[];
       paymentSettings: PaymentSettings;
       platformConfig: PlatformConfig;
@@ -736,11 +828,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUser(res.data.user);
     setTransactions(res.data.transactions || []);
     setMatchHistory(res.data.matchHistory || []);
+    setNotifications(res.data.notifications || []);
     setSupportTickets(res.data.supportTickets || []);
     if (res.data.paymentSettings) setPaymentSettings(res.data.paymentSettings);
     if (res.data.platformConfig) applyNormalizedPlatformConfig(res.data.platformConfig);
     setIsLoggedIn(true);
-    setActiveTab('dashboard');
+    setActiveTab((prev) => (prev === 'wallet' ? 'wallet' : 'dashboard'));
     void refreshRanking();
     return { ok: true };
   };
@@ -751,6 +844,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       token: string;
       transactions: Transaction[];
       matchHistory: MatchHistoryEntry[];
+      notifications?: AppNotification[];
       supportTickets: SupportTicket[];
       paymentSettings: PaymentSettings;
       platformConfig: PlatformConfig;
@@ -766,11 +860,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUser(res.data.user);
     setTransactions(res.data.transactions || []);
     setMatchHistory(res.data.matchHistory || []);
+    setNotifications(res.data.notifications || []);
     setSupportTickets(res.data.supportTickets || []);
     if (res.data.paymentSettings) setPaymentSettings(res.data.paymentSettings);
     if (res.data.platformConfig) applyNormalizedPlatformConfig(res.data.platformConfig);
     setIsLoggedIn(true);
-    setActiveTab('dashboard');
+    setActiveTab((prev) => (prev === 'wallet' ? 'wallet' : 'dashboard'));
     void refreshRanking();
     return { ok: true };
   };
@@ -852,6 +947,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUser(GUEST_USER);
     setTransactions([]);
     setMatchHistory([]);
+    setNotifications([]);
     setSupportTickets([]);
     setSelectedRoomId('');
     try {
@@ -1123,6 +1219,164 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveTab('rooms');
   };
 
+  const invitePlayerToRoom = async (query: string): Promise<ActionResult & { invitedUserName?: string }> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Sessão expirada.' };
+    if (!selectedRoom) return { ok: false, error: 'Nenhuma sala selecionada.' };
+    const clean = query.trim();
+    if (!clean) return { ok: false, error: 'Indique o nome ou telemóvel do jogador.' };
+
+    const res = await apiJson<{ ok: boolean; invitedUserName: string }>(
+      `/api/rooms/${encodeURIComponent(selectedRoom.id)}/invite`,
+      {
+        method: 'POST',
+        token,
+        body: { query: clean }
+      }
+    );
+    if (!res.ok) return { ok: false, error: res.error };
+    soundManager.playMessagePop();
+    return { ok: true, invitedUserName: res.data.invitedUserName };
+  };
+
+  // ---------- Notifications & Web Push (VAPID) ----------
+
+  const unreadNotificationsCount = notifications.filter((n) => !n.read).length;
+
+  const markNotificationsRead = useCallback(async (ids?: string[]) => {
+    const token = authTokenRef.current || adminTokenRef.current;
+    if (!token) return;
+    const res = await apiJson<{ notifications: AppNotification[] }>('/api/notifications/read', {
+      method: 'POST',
+      token,
+      body: ids && ids.length > 0 ? { ids } : {}
+    });
+    if (res.ok && Array.isArray(res.data.notifications)) {
+      setNotifications(res.data.notifications);
+    }
+  }, []);
+
+  const togglePushNotifications = async (enable: boolean): Promise<ActionResult> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Inicie sessão primeiro.' };
+    setPushError(null);
+    setPushBusy(true);
+
+    try {
+      if (!enable) {
+        let endpoint: string | undefined;
+        try {
+          if ('serviceWorker' in navigator) {
+            const reg = await navigator.serviceWorker.getRegistration('/');
+            const sub = await reg?.pushManager?.getSubscription();
+            if (sub) {
+              endpoint = sub.endpoint;
+              await sub.unsubscribe();
+            }
+          }
+        } catch {
+          // ignore local unsubscribe errors
+        }
+        await apiJson<{ ok: boolean }>('/api/push/unsubscribe', {
+          method: 'POST',
+          token,
+          body: endpoint ? { endpoint } : {}
+        });
+        setIsPushSubscribed(false);
+        return { ok: true };
+      }
+
+      if (isIOSDevice && !isStandalonePWA) {
+        const msg =
+          'No iPhone/iPad, instale primeiro a app no ecrã principal (Partilhar → Adicionar ao ecrã principal) para ativar notificações.';
+        setPushError(msg);
+        return { ok: false, error: msg };
+      }
+
+      if (
+        typeof window === 'undefined' ||
+        !('Notification' in window) ||
+        !('serviceWorker' in navigator) ||
+        !('PushManager' in window)
+      ) {
+        const msg = 'Este navegador não suporta notificações Push.';
+        setPushError(msg);
+        return { ok: false, error: msg };
+      }
+
+      let publicKey = pushVapidPublicKey;
+      let enabledOnServer = pushAvailableOnServer;
+      if (!publicKey) {
+        const vapidRes = await apiJson<{ enabled: boolean; publicKey: string | null }>('/api/push/vapid-public-key');
+        if (vapidRes.ok) {
+          enabledOnServer = Boolean(vapidRes.data.enabled && vapidRes.data.publicKey);
+          publicKey = vapidRes.data.publicKey || null;
+          setPushAvailableOnServer(enabledOnServer);
+          setPushVapidPublicKey(publicKey);
+        }
+      }
+
+      if (!enabledOnServer || !publicKey) {
+        const msg = 'Notificações Push temporariamente desativadas no servidor (chaves VAPID não configuradas).';
+        setPushError(msg);
+        return { ok: false, error: msg };
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        const msg = 'Permissão de notificações recusada. Ative-a nas definições do navegador.';
+        setPushError(msg);
+        return { ok: false, error: msg };
+      }
+
+      let reg = await navigator.serviceWorker.getRegistration('/');
+      if (!reg) {
+        reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      }
+      await navigator.serviceWorker.ready;
+
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
+        const base64 = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const raw = window.atob(base64);
+        const appServerKey = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) {
+          appServerKey[i] = raw.charCodeAt(i);
+        }
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: appServerKey
+        });
+      }
+
+      const subJson = sub.toJSON();
+      const saveRes = await apiJson<{ ok: boolean }>('/api/push/subscribe', {
+        method: 'POST',
+        token,
+        body: {
+          endpoint: subJson.endpoint,
+          keys: subJson.keys
+        }
+      });
+
+      if (!saveRes.ok) {
+        setPushError(saveRes.error);
+        return { ok: false, error: saveRes.error };
+      }
+
+      soundManager.playCoin();
+      setIsPushSubscribed(true);
+      return { ok: true };
+    } catch {
+      const msg = 'Não foi possível configurar as notificações neste dispositivo.';
+      setPushError(msg);
+      return { ok: false, error: msg };
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   // ---------- Financial Requests (100% Server-Authoritative) ----------
 
   const requestDeposit = async (params: {
@@ -1271,6 +1525,41 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { ok: true };
   };
 
+  const adminGrantBonus = async (params: {
+    userId: string;
+    currency: Currency;
+    amount: number;
+    reason?: string;
+  }): Promise<ActionResult> => {
+    if (!adminToken) return { ok: false, error: 'Sessão administrativa expirada.' };
+    const res = await apiJson<{
+      user: User;
+      transaction: Transaction;
+      notification: AppNotification;
+      overview: AdminOverview;
+    }>(`/api/admin/users/${encodeURIComponent(params.userId)}/bonus`, {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        currency: params.currency,
+        amount: params.amount,
+        reason: params.reason
+      }
+    });
+    if (!res.ok) return { ok: false, error: res.error };
+    soundManager.playCoin();
+    if (res.data.overview) setAdminOverview(res.data.overview);
+    if (res.data.user && res.data.user.id === currentUser.id) {
+      setCurrentUser((prev) => ({ ...res.data.user, role: prev.role }));
+      if (res.data.transaction) {
+        setTransactions((prev) =>
+          prev.some((t) => t.id === res.data.transaction.id) ? prev : [res.data.transaction, ...prev]
+        );
+      }
+    }
+    return { ok: true };
+  };
+
   const adminToggleUserSuspension = async (userId: string): Promise<ActionResult> => {
     if (!adminToken) return { ok: false, error: 'Sessão administrativa expirada.' };
     const res = await apiJson<{ user: User; overview: AdminOverview }>(
@@ -1325,6 +1614,9 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         pendingInviteCode,
         transactions,
         matchHistory,
+        notifications,
+        unreadNotificationsCount,
+        markNotificationsRead,
         supportTickets,
         rankingList,
         refreshRanking,
@@ -1341,6 +1633,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         createRoom,
         joinRoom,
         joinRoomByCode,
+        invitePlayerToRoom,
         selectBaseColor,
         selectBoardTheme,
         requestThemeUnlock,
@@ -1361,6 +1654,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         adminRejectDeposit,
         adminApproveWithdrawal,
         adminRejectWithdrawal,
+        adminGrantBonus,
         adminReplySupport,
         adminToggleUserSuspension,
         isAdminUnlocked,
@@ -1373,7 +1667,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         getThemePrice,
         walletMode,
         setWalletMode,
-        updateProfile
+        updateProfile,
+        pushAvailableOnServer,
+        isPushSubscribed,
+        pushBusy,
+        pushError,
+        isIOSDevice,
+        isStandalonePWA,
+        togglePushNotifications
       }}
     >
       {children}

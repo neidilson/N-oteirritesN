@@ -5,6 +5,8 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
+import * as webpushNs from 'web-push';
+const webpush = (webpushNs as unknown as { default?: typeof webpushNs }).default ?? webpushNs;
 import type {
   Room,
   PlayerSlot,
@@ -16,7 +18,9 @@ import type {
   ChatMessage,
   BoardThemeId,
   PlatformConfig,
-  PaymentMethod
+  PaymentMethod,
+  AppNotification,
+  NotificationType
 } from './src/types/index.ts';
 import {
   SAFE_CELLS,
@@ -40,6 +44,24 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const TURN_SECONDS = 20;
+
+const VAPID_PUBLIC_KEY = (process.env.VAPID_PUBLIC_KEY || '').trim();
+const VAPID_PRIVATE_KEY = (process.env.VAPID_PRIVATE_KEY || '').trim();
+const VAPID_SUBJECT = (process.env.VAPID_SUBJECT || 'mailto:suporte@naoteirrites.ao').trim();
+
+let pushEnabled = false;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    pushEnabled = true;
+    console.log('[N – PUSH] Web Push (VAPID) configurado e ativo.');
+  } catch (err) {
+    console.warn('[N – PUSH] Chaves VAPID inválidas; Web Push desativado:', err);
+    pushEnabled = false;
+  }
+} else {
+  console.log('[N – PUSH] Web Push desativado (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY não configuradas).');
+}
 
 interface ClientMeta {
   ws: WebSocket;
@@ -298,17 +320,19 @@ function broadcastRoomTick(roomId: string, turnTimer: number) {
 async function pushUserSync(userId: string) {
   if (!userId || userId.startsWith('bot_')) return;
   try {
-    const [user, transactions, matchHistory] = await Promise.all([
+    const [user, transactions, matchHistory, notifications] = await Promise.all([
       db.getUserById(userId),
       db.getUserTransactions(userId),
-      db.getUserMatchHistory(userId)
+      db.getUserMatchHistory(userId),
+      db.getUserNotifications(userId)
     ]);
     if (!user) return;
     const payload = JSON.stringify({
       type: 'user:sync',
       user,
       transactions,
-      matchHistory
+      matchHistory,
+      notifications
     });
     for (const [ws, meta] of clientsMap.entries()) {
       if (ws.readyState === WebSocket.OPEN && meta.userId === userId) {
@@ -320,6 +344,92 @@ async function pushUserSync(userId: string) {
     }
   } catch (err) {
     console.error('[N – WS] Erro em pushUserSync:', err);
+  }
+}
+
+function sendSocketNotification(userId: string, notification: AppNotification) {
+  const payload = JSON.stringify({ type: 'notification:new', notification });
+  for (const [ws, meta] of clientsMap.entries()) {
+    if (ws.readyState === WebSocket.OPEN && meta.userId === userId) {
+      ws.send(payload);
+    }
+  }
+}
+
+async function sendWebPushToUser(
+  userId: string,
+  payload: { title: string; body: string; url?: string; tag?: string }
+) {
+  if (!pushEnabled || !userId || userId.startsWith('bot_')) return;
+  try {
+    const subs = await db.getUserPushSubscriptions(userId);
+    if (subs.length === 0) return;
+
+    const jsonPayload = JSON.stringify({
+      title: payload.title,
+      body: payload.body,
+      url: payload.url || '/?tab=wallet',
+      tag: payload.tag || 'nti-notification'
+    });
+
+    await Promise.all(
+      subs.map(async (sub) => {
+        try {
+          await webpush.sendNotification(
+            {
+              endpoint: sub.endpoint,
+              keys: sub.keys
+            },
+            jsonPayload
+          );
+        } catch (err: unknown) {
+          const statusCode =
+            typeof err === 'object' && err !== null && 'statusCode' in err
+              ? Number((err as { statusCode?: number }).statusCode)
+              : 0;
+          if (statusCode === 404 || statusCode === 410) {
+            await db.deletePushSubscriptionByEndpoint(sub.endpoint);
+          } else {
+            console.warn('[N – PUSH] Falha ao enviar push:', statusCode || err);
+          }
+        }
+      })
+    );
+  } catch (err) {
+    console.warn('[N – PUSH] Erro ao processar subscrições push:', err);
+  }
+}
+
+async function notifyAndPushUser(params: {
+  userId: string;
+  title: string;
+  body: string;
+  type: NotificationType;
+  pushBody?: string;
+  url?: string;
+  existingNotification?: AppNotification | null;
+}) {
+  if (!params.userId || params.userId.startsWith('bot_')) return;
+  try {
+    const notif =
+      params.existingNotification ||
+      (await db.createNotification({
+        userId: params.userId,
+        title: params.title,
+        body: params.body,
+        type: params.type
+      }));
+    if (notif) {
+      sendSocketNotification(params.userId, notif);
+    }
+    void sendWebPushToUser(params.userId, {
+      title: params.title,
+      body: params.pushBody || params.body,
+      url: params.url || '/?tab=wallet',
+      tag: `nti-${params.type}`
+    });
+  } catch (err) {
+    console.error('[N – NOTIFY] Erro ao notificar utilizador:', err);
   }
 }
 
@@ -999,11 +1109,12 @@ async function startServer() {
         res.status(400).json({ error: result.error });
         return;
       }
-      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+      const [transactions, matchHistory, supportTickets, notifications, paymentSettings, cfg] =
         await Promise.all([
           db.getUserTransactions(result.user.id),
           db.getUserMatchHistory(result.user.id),
           db.getUserSupportTickets(result.user.id),
+          db.getUserNotifications(result.user.id),
           db.getPaymentSettings(),
           db.getPlatformConfig()
         ]);
@@ -1013,6 +1124,7 @@ async function startServer() {
         transactions,
         matchHistory,
         supportTickets,
+        notifications,
         paymentSettings,
         platformConfig: cfg
       });
@@ -1033,11 +1145,12 @@ async function startServer() {
         res.status(401).json({ error: result.error });
         return;
       }
-      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+      const [transactions, matchHistory, supportTickets, notifications, paymentSettings, cfg] =
         await Promise.all([
           db.getUserTransactions(result.user.id),
           db.getUserMatchHistory(result.user.id),
           db.getUserSupportTickets(result.user.id),
+          db.getUserNotifications(result.user.id),
           db.getPaymentSettings(),
           db.getPlatformConfig()
         ]);
@@ -1047,6 +1160,7 @@ async function startServer() {
         transactions,
         matchHistory,
         supportTickets,
+        notifications,
         paymentSettings,
         platformConfig: cfg
       });
@@ -1087,11 +1201,12 @@ async function startServer() {
         res.status(404).json({ error: 'Utilizador não encontrado.' });
         return;
       }
-      const [transactions, matchHistory, supportTickets, paymentSettings, cfg] =
+      const [transactions, matchHistory, supportTickets, notifications, paymentSettings, cfg] =
         await Promise.all([
           db.getUserTransactions(user.id),
           db.getUserMatchHistory(user.id),
           db.getUserSupportTickets(user.id),
+          db.getUserNotifications(user.id),
           db.getPaymentSettings(),
           db.getPlatformConfig()
         ]);
@@ -1100,6 +1215,7 @@ async function startServer() {
         transactions,
         matchHistory,
         supportTickets,
+        notifications,
         paymentSettings,
         platformConfig: cfg
       });
@@ -1240,6 +1356,108 @@ async function startServer() {
     }
   });
 
+  // ---------- Notifications & Web Push Endpoints ----------
+  app.get('/api/notifications', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const notifications = await db.getUserNotifications(req.session!.userId);
+      res.json({ notifications });
+    } catch (err) {
+      console.error('[N – API] /api/notifications error:', err);
+      res.status(500).json({ error: 'Erro ao carregar notificações.' });
+    }
+  });
+
+  app.post('/api/notifications/read', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const ids = Array.isArray(req.body?.ids)
+        ? (req.body.ids as unknown[]).map((x) => String(x)).filter(Boolean)
+        : undefined;
+      const notifications = await db.markNotificationsRead(req.session!.userId, ids);
+      res.json({ notifications });
+    } catch (err) {
+      console.error('[N – API] /api/notifications/read error:', err);
+      res.status(500).json({ error: 'Erro ao atualizar notificações.' });
+    }
+  });
+
+  app.get('/api/push/vapid-public-key', (_req, res) => {
+    res.json({
+      enabled: pushEnabled,
+      publicKey: pushEnabled ? VAPID_PUBLIC_KEY : null
+    });
+  });
+
+  app.post('/api/push/subscribe', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const endpoint = String(req.body?.endpoint || '').trim();
+      const p256dh = String(req.body?.keys?.p256dh || '').trim();
+      const auth = String(req.body?.keys?.auth || '').trim();
+      if (!endpoint || !p256dh || !auth) {
+        res.status(400).json({ error: 'Subscrição Web Push inválida.' });
+        return;
+      }
+      const subscription = await db.savePushSubscription({
+        userId: req.session!.userId,
+        endpoint,
+        keys: { p256dh, auth }
+      });
+      res.status(201).json({ ok: true, id: subscription.id });
+    } catch (err) {
+      console.error('[N – API] /api/push/subscribe error:', err);
+      res.status(500).json({ error: 'Erro ao guardar subscrição push.' });
+    }
+  });
+
+  app.post('/api/push/unsubscribe', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : undefined;
+      await db.deletePushSubscription(req.session!.userId, endpoint);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[N – API] /api/push/unsubscribe error:', err);
+      res.status(500).json({ error: 'Erro ao remover subscrição push.' });
+    }
+  });
+
+  app.post('/api/rooms/:roomId/invite', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const roomId = String(req.params.roomId || '');
+      const room = roomsMap.get(roomId);
+      if (!room) {
+        res.status(404).json({ error: 'Sala não encontrada ou já encerrada.' });
+        return;
+      }
+      const query = String(req.body?.query || req.body?.targetUserId || '').trim();
+      if (!query) {
+        res.status(400).json({ error: 'Indique o nome ou telemóvel do jogador a convidar.' });
+        return;
+      }
+      const targetUser = await db.findUserByPhoneOrName(query);
+      if (!targetUser) {
+        res.status(404).json({ error: 'Jogador não encontrado na plataforma.' });
+        return;
+      }
+      if (targetUser.id === req.session!.userId) {
+        res.status(400).json({ error: 'Não pode enviar convite a si próprio.' });
+        return;
+      }
+      const sender = await db.getUserById(req.session!.userId);
+      const senderName = sender?.name || 'Um jogador';
+      await notifyAndPushUser({
+        userId: targetUser.id,
+        title: 'Convite para Partida!',
+        body: `${senderName} convidou-te para a sala "${room.name}" (${room.code}).`,
+        pushBody: `${senderName} convidou-te para jogar uma partida.`,
+        type: 'invite',
+        url: `/?sala=${room.code}`
+      });
+      res.json({ ok: true, invitedUserName: targetUser.name });
+    } catch (err) {
+      console.error('[N – API] /api/rooms/:roomId/invite error:', err);
+      res.status(500).json({ error: 'Erro ao enviar convite.' });
+    }
+  });
+
   // ---------- Admin Endpoints ----------
   app.get('/api/admin/overview', requireAdmin, async (_req, res) => {
     try {
@@ -1251,6 +1469,50 @@ async function startServer() {
     }
   });
 
+  app.post('/api/admin/users/:userId/bonus', requireAdmin, async (req: AuthedRequest, res) => {
+    try {
+      const targetUserId = String(req.params.userId || '');
+      const { amount, currency, reason } = req.body || {};
+      const adminUser = req.session?.userId ? await db.getUserById(req.session.userId) : null;
+      const grantedBy = adminUser ? `${adminUser.name} (Admin)` : 'Administrador N';
+
+      const result = await db.adminGrantBonus({
+        userId: targetUserId,
+        currency: currency === 'USDT' ? 'USDT' : currency === 'KZ' ? 'KZ' : (String(currency || '') as Currency),
+        amount: Number(amount),
+        reason: typeof reason === 'string' ? reason : undefined,
+        grantedBy
+      });
+
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+
+      await pushUserSync(result.user.id);
+      await notifyAndPushUser({
+        userId: result.user.id,
+        title: result.notification.title,
+        body: result.notification.body,
+        pushBody: 'Recebeste um bónus na tua carteira N!',
+        type: 'bonus',
+        url: '/?tab=wallet',
+        existingNotification: result.notification
+      });
+
+      const overview = await db.getAdminOverview();
+      res.status(201).json({
+        user: result.user,
+        transaction: result.transaction,
+        notification: result.notification,
+        overview
+      });
+    } catch (err) {
+      console.error('[N – API] /api/admin/users/:userId/bonus error:', err);
+      res.status(500).json({ error: 'Erro ao conceder bónus.' });
+    }
+  });
+
   app.post('/api/admin/deposits/:txId/approve', requireAdmin, async (req, res) => {
     try {
       const result = await db.adminApproveDeposit(String(req.params.txId));
@@ -1258,7 +1520,22 @@ async function startServer() {
         res.status(400).json({ error: result.error });
         return;
       }
-      if (result.user) await pushUserSync(result.user.id);
+      if (result.user) {
+        await pushUserSync(result.user.id);
+        const isTheme = result.transaction.type === 'THEME_UNLOCK';
+        await notifyAndPushUser({
+          userId: result.user.id,
+          title: isTheme ? 'Tabuleiro Desbloqueado!' : 'Depósito Aprovado',
+          body: isTheme
+            ? `O teu tabuleiro ${result.transaction.themeName || ''} foi desbloqueado com sucesso!`
+            : `O teu depósito de ${result.transaction.amount.toLocaleString('pt-AO')} ${result.transaction.currency} foi aprovado.`,
+          pushBody: isTheme
+            ? 'O teu pedido de desbloqueio de tabuleiro foi aprovado.'
+            : 'O teu depósito foi aprovado e creditado na carteira.',
+          type: 'deposit',
+          url: '/?tab=wallet'
+        });
+      }
       const overview = await db.getAdminOverview();
       res.json({ transaction: result.transaction, overview });
     } catch (err) {
@@ -1275,6 +1552,14 @@ async function startServer() {
         return;
       }
       await pushUserSync(result.transaction.userId);
+      await notifyAndPushUser({
+        userId: result.transaction.userId,
+        title: 'Depósito Rejeitado',
+        body: 'O comprovativo do teu pedido não foi validado. Verifica os detalhes na Carteira.',
+        pushBody: 'O teu pedido de depósito foi rejeitado. Verifica a tua carteira.',
+        type: 'deposit',
+        url: '/?tab=wallet'
+      });
       const overview = await db.getAdminOverview();
       res.json({ transaction: result.transaction, overview });
     } catch (err) {
@@ -1290,7 +1575,17 @@ async function startServer() {
         res.status(400).json({ error: result.error });
         return;
       }
-      if (result.user) await pushUserSync(result.user.id);
+      if (result.user) {
+        await pushUserSync(result.user.id);
+        await notifyAndPushUser({
+          userId: result.user.id,
+          title: 'Levantamento Pago',
+          body: `O teu levantamento de ${result.transaction.amount.toLocaleString('pt-AO')} ${result.transaction.currency} foi processado.`,
+          pushBody: 'O teu levantamento foi aprovado e pago.',
+          type: 'withdraw',
+          url: '/?tab=wallet'
+        });
+      }
       const overview = await db.getAdminOverview();
       res.json({ transaction: result.transaction, overview });
     } catch (err) {
@@ -1306,7 +1601,17 @@ async function startServer() {
         res.status(400).json({ error: result.error });
         return;
       }
-      if (result.user) await pushUserSync(result.user.id);
+      if (result.user) {
+        await pushUserSync(result.user.id);
+        await notifyAndPushUser({
+          userId: result.user.id,
+          title: 'Levantamento Rejeitado',
+          body: 'O teu levantamento foi rejeitado e o valor foi devolvido à carteira.',
+          pushBody: 'O teu levantamento foi rejeitado e estornado.',
+          type: 'withdraw',
+          url: '/?tab=wallet'
+        });
+      }
       const overview = await db.getAdminOverview();
       res.json({ transaction: result.transaction, overview });
     } catch (err) {

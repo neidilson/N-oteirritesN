@@ -6,15 +6,19 @@ import { Pool, PoolClient } from 'pg';
 import type {
   AdminOverview,
   AdminPlayerSummary,
+  AppNotification,
   BoardThemeId,
   Currency,
   MatchHistoryEntry,
   MatchHistoryPlayer,
+  NotificationType,
   PaymentMethod,
   PaymentSettings,
   PlatformConfig,
   PlayerCategory,
   PlayerColor,
+  PushSubscriptionKeys,
+  PushSubscriptionRecord,
   RankingPlayer,
   Room,
   SupportMessage,
@@ -225,6 +229,8 @@ class DatabaseRepository {
   private memTransactions: Transaction[] = [];
   private memMatches: MatchHistoryEntry[] = [];
   private memTickets: SupportTicket[] = [];
+  private memNotifications: AppNotification[] = [];
+  private memPushSubscriptions: PushSubscriptionRecord[] = [];
   private memPlatformConfig: PlatformConfig = DEFAULT_PLATFORM_CONFIG;
   private memPaymentSettings: PaymentSettings = DEFAULT_PAYMENT_SETTINGS;
   private settledMatchKeys = new Set<string>();
@@ -404,6 +410,31 @@ class DatabaseRepository {
         value JSONB NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reason TEXT;
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS granted_by TEXT;
+
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'system',
+        is_read BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        endpoint TEXT UNIQUE NOT NULL,
+        keys JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
     `);
   }
 
@@ -492,8 +523,22 @@ class DatabaseRepository {
       notes: row.notes ? String(row.notes) : undefined,
       themeId: row.theme_id ? (String(row.theme_id) as BoardThemeId) : undefined,
       themeName: row.theme_name ? String(row.theme_name) : undefined,
+      reason: row.reason ? String(row.reason) : undefined,
+      grantedBy: row.granted_by ? String(row.granted_by) : undefined,
       createdAt: formatDatePtAo(row.created_at as string | Date),
       updatedAt: row.updated_at ? formatDatePtAo(row.updated_at as string | Date) : undefined
+    };
+  }
+
+  private mapNotificationRow(row: Record<string, unknown>): AppNotification {
+    return {
+      id: String(row.id),
+      userId: String(row.user_id),
+      title: String(row.title),
+      body: String(row.body),
+      type: (row.type as NotificationType) || 'system',
+      read: Boolean(row.is_read),
+      createdAt: formatDatePtAo(row.created_at as string | Date)
     };
   }
 
@@ -1896,6 +1941,334 @@ class DatabaseRepository {
     const res = await this.pool.query(
       `UPDATE users SET is_suspended = NOT is_suspended, updated_at = NOW() WHERE id = $1 RETURNING *`,
       [userId]
+    );
+    return res.rows[0] ? this.mapUserRow(res.rows[0]) : null;
+  }
+
+  // ---------- Admin Bonus Grant (Atomic SQL Transaction) ----------
+
+  async adminGrantBonus(params: {
+    userId: string;
+    currency: Currency;
+    amount: number;
+    reason?: string;
+    grantedBy: string;
+  }): Promise<
+    | { ok: true; user: User; transaction: Transaction; notification: AppNotification }
+    | { ok: false; error: string }
+  > {
+    if (params.currency !== 'KZ' && params.currency !== 'USDT') {
+      return { ok: false, error: 'Moeda inválida. Escolha KZ ou USDT.' };
+    }
+
+    const amount =
+      params.currency === 'KZ'
+        ? Math.round(Number(params.amount))
+        : Number(Number(params.amount).toFixed(4));
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { ok: false, error: 'O valor do bónus deve ser positivo.' };
+    }
+
+    const MAX_BONUS_KZ = 5_000_000;
+    const MAX_BONUS_USDT = 5_000;
+    if (params.currency === 'KZ' && amount > MAX_BONUS_KZ) {
+      return {
+        ok: false,
+        error: `Valor máximo permitido por bónus é ${MAX_BONUS_KZ.toLocaleString('pt-AO')} Kz.`
+      };
+    }
+    if (params.currency === 'USDT' && amount > MAX_BONUS_USDT) {
+      return {
+        ok: false,
+        error: `Valor máximo permitido por bónus é ${MAX_BONUS_USDT.toLocaleString('pt-AO')} USDT.`
+      };
+    }
+
+    const cleanReason = (params.reason || '').trim().slice(0, 200) || 'Bónus promocional concedido pela administração';
+    const grantedBy = (params.grantedBy || 'Admin N').trim().slice(0, 100);
+    const txId = `tx_bon_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
+    const notifId = `ntf_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
+    const formattedVal = `${amount.toLocaleString('pt-AO')} ${params.currency === 'KZ' ? 'Kz' : 'USDT'}`;
+    const notifTitle = 'Bónus Recebido!';
+    const notifBody = `Recebeste um bónus de ${formattedVal}${params.reason?.trim() ? ` — ${params.reason.trim()}` : ''}.`;
+
+    if (!this.pool) {
+      const u = this.memUsers.get(params.userId);
+      if (!u) return { ok: false, error: 'Utilizador não encontrado.' };
+      if (u.isSuspended) {
+        return { ok: false, error: 'Não é possível conceder bónus a um utilizador suspenso.' };
+      }
+
+      if (params.currency === 'KZ') {
+        u.kzBalance = Number((u.kzBalance + amount).toFixed(2));
+      } else {
+        u.usdtBalance = Number((u.usdtBalance + amount).toFixed(4));
+      }
+
+      const nowStr = formatDatePtAo(new Date());
+      const tx: Transaction = {
+        id: txId,
+        userId: u.id,
+        userName: u.name,
+        type: 'bonus',
+        currency: params.currency,
+        amount,
+        fee: 0,
+        status: 'Confirmado',
+        method: 'MULTICAIXA_EXPRESS',
+        reference: `BONUS-${Date.now().toString().slice(-6)}`,
+        notes: `${cleanReason} (Por: ${grantedBy})`,
+        reason: cleanReason,
+        grantedBy,
+        createdAt: nowStr,
+        updatedAt: nowStr
+      };
+      this.memTransactions.unshift(tx);
+
+      const notif: AppNotification = {
+        id: notifId,
+        userId: u.id,
+        title: notifTitle,
+        body: notifBody,
+        type: 'bonus',
+        read: false,
+        createdAt: nowStr
+      };
+      this.memNotifications.unshift(notif);
+
+      return { ok: true, user: this.sanitizeUser(u), transaction: tx, notification: notif };
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const userRes = await client.query(`SELECT * FROM users WHERE id = $1 FOR UPDATE`, [
+        params.userId
+      ]);
+      const row = userRes.rows[0];
+      if (!row) {
+        return { ok: false, error: 'Utilizador não encontrado.' };
+      }
+      if (row.is_suspended) {
+        return { ok: false, error: 'Não é possível conceder bónus a um utilizador suspenso.' };
+      }
+
+      const balCol = params.currency === 'USDT' ? 'usdt_balance' : 'kz_balance';
+      const uUpd = await client.query(
+        `UPDATE users SET ${balCol} = ${balCol} + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [params.userId, amount]
+      );
+
+      const txIns = await client.query(
+        `INSERT INTO transactions (
+          id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes, reason, granted_by
+        ) VALUES ($1, $2, $3, 'bonus', $4, $5, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $6, $7, $8, $9)
+        RETURNING *`,
+        [
+          txId,
+          params.userId,
+          String(row.name),
+          params.currency,
+          amount,
+          `BONUS-${Date.now().toString().slice(-6)}`,
+          `${cleanReason} (Por: ${grantedBy})`,
+          cleanReason,
+          grantedBy
+        ]
+      );
+
+      const notifIns = await client.query(
+        `INSERT INTO notifications (id, user_id, title, body, type, is_read)
+         VALUES ($1, $2, $3, $4, 'bonus', false)
+         RETURNING *`,
+        [notifId, params.userId, notifTitle, notifBody]
+      );
+
+      return {
+        ok: true,
+        user: this.mapUserRow(uUpd.rows[0]),
+        transaction: this.mapTransactionRow(txIns.rows[0]),
+        notification: this.mapNotificationRow(notifIns.rows[0])
+      };
+    });
+  }
+
+  // ---------- Notifications & Push Subscriptions ----------
+
+  async createNotification(params: {
+    userId: string;
+    title: string;
+    body: string;
+    type: NotificationType;
+  }): Promise<AppNotification | null> {
+    const user = await this.getUserById(params.userId);
+    if (!user) return null;
+
+    const id = `ntf_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
+    if (!this.pool) {
+      const notif: AppNotification = {
+        id,
+        userId: params.userId,
+        title: params.title,
+        body: params.body,
+        type: params.type,
+        read: false,
+        createdAt: formatDatePtAo(new Date())
+      };
+      this.memNotifications.unshift(notif);
+      return notif;
+    }
+
+    const res = await this.pool.query(
+      `INSERT INTO notifications (id, user_id, title, body, type, is_read)
+       VALUES ($1, $2, $3, $4, $5, false)
+       RETURNING *`,
+      [id, params.userId, params.title, params.body, params.type]
+    );
+    return res.rows[0] ? this.mapNotificationRow(res.rows[0]) : null;
+  }
+
+  async getUserNotifications(userId: string): Promise<AppNotification[]> {
+    if (!this.pool) {
+      return this.memNotifications.filter((n) => n.userId === userId).slice(0, 50);
+    }
+    const res = await this.pool.query(
+      `SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [userId]
+    );
+    return res.rows.map((r) => this.mapNotificationRow(r));
+  }
+
+  async markNotificationsRead(userId: string, ids?: string[]): Promise<AppNotification[]> {
+    if (!this.pool) {
+      for (const n of this.memNotifications) {
+        if (n.userId === userId && (!ids || ids.length === 0 || ids.includes(n.id))) {
+          n.read = true;
+        }
+      }
+      return this.getUserNotifications(userId);
+    }
+
+    if (ids && ids.length > 0) {
+      await this.pool.query(
+        `UPDATE notifications SET is_read = true WHERE user_id = $1 AND id = ANY($2::text[])`,
+        [userId, ids]
+      );
+    } else {
+      await this.pool.query(`UPDATE notifications SET is_read = true WHERE user_id = $1`, [userId]);
+    }
+    return this.getUserNotifications(userId);
+  }
+
+  async savePushSubscription(params: {
+    userId: string;
+    endpoint: string;
+    keys: PushSubscriptionKeys;
+  }): Promise<PushSubscriptionRecord> {
+    const id = `psub_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
+    if (!this.pool) {
+      const existingIdx = this.memPushSubscriptions.findIndex(
+        (s) => s.endpoint === params.endpoint
+      );
+      const record: PushSubscriptionRecord = {
+        id,
+        userId: params.userId,
+        endpoint: params.endpoint,
+        keys: params.keys,
+        createdAt: formatDatePtAo(new Date())
+      };
+      if (existingIdx !== -1) {
+        this.memPushSubscriptions[existingIdx] = record;
+      } else {
+        this.memPushSubscriptions.unshift(record);
+      }
+      return record;
+    }
+
+    const res = await this.pool.query(
+      `INSERT INTO push_subscriptions (id, user_id, endpoint, keys)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT (endpoint) DO UPDATE
+         SET user_id = EXCLUDED.user_id,
+             keys = EXCLUDED.keys
+       RETURNING *`,
+      [id, params.userId, params.endpoint, JSON.stringify(params.keys)]
+    );
+    const r = res.rows[0];
+    return {
+      id: String(r.id),
+      userId: String(r.user_id),
+      endpoint: String(r.endpoint),
+      keys: r.keys as PushSubscriptionKeys,
+      createdAt: formatDatePtAo(r.created_at as string | Date)
+    };
+  }
+
+  async deletePushSubscription(userId: string, endpoint?: string): Promise<void> {
+    if (!this.pool) {
+      this.memPushSubscriptions = this.memPushSubscriptions.filter((s) =>
+        endpoint ? !(s.userId === userId && s.endpoint === endpoint) : s.userId !== userId
+      );
+      return;
+    }
+    if (endpoint) {
+      await this.pool.query(
+        `DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2`,
+        [userId, endpoint]
+      );
+    } else {
+      await this.pool.query(`DELETE FROM push_subscriptions WHERE user_id = $1`, [userId]);
+    }
+  }
+
+  async deletePushSubscriptionByEndpoint(endpoint: string): Promise<void> {
+    if (!this.pool) {
+      this.memPushSubscriptions = this.memPushSubscriptions.filter((s) => s.endpoint !== endpoint);
+      return;
+    }
+    await this.pool.query(`DELETE FROM push_subscriptions WHERE endpoint = $1`, [endpoint]);
+  }
+
+  async getUserPushSubscriptions(userId: string): Promise<PushSubscriptionRecord[]> {
+    if (!this.pool) {
+      return this.memPushSubscriptions.filter((s) => s.userId === userId);
+    }
+    const res = await this.pool.query(
+      `SELECT * FROM push_subscriptions WHERE user_id = $1`,
+      [userId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      userId: String(r.user_id),
+      endpoint: String(r.endpoint),
+      keys: r.keys as PushSubscriptionKeys,
+      createdAt: formatDatePtAo(r.created_at as string | Date)
+    }));
+  }
+
+  async findUserByPhoneOrName(query: string): Promise<User | null> {
+    const q = query.trim();
+    if (!q) return null;
+    const normPhone = normalizePhone(q);
+
+    if (!this.pool) {
+      if (normPhone && this.memPhoneIndex.has(normPhone)) {
+        const u = this.memUsers.get(this.memPhoneIndex.get(normPhone)!);
+        return u ? this.sanitizeUser(u) : null;
+      }
+      const lower = q.toLowerCase();
+      for (const u of this.memUsers.values()) {
+        if (u.name.toLowerCase().includes(lower) || u.id === q) {
+          return this.sanitizeUser(u);
+        }
+      }
+      return null;
+    }
+
+    const res = await this.pool.query(
+      `SELECT * FROM users
+       WHERE id = $1 OR phone_normalized = $2 OR LOWER(name) LIKE $3
+       LIMIT 1`,
+      [q, normPhone || '__none__', `%${q.toLowerCase()}%`]
     );
     return res.rows[0] ? this.mapUserRow(res.rows[0]) : null;
   }

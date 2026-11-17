@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { GameProvider, useGame } from './context/GameContext';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
@@ -14,10 +14,35 @@ import { RankingView } from './components/RankingView';
 import { SupportView } from './components/SupportView';
 import { AdminPanel } from './components/AdminPanel';
 import { AuthView } from './components/AuthView';
-import { ShieldCheck, Heart } from 'lucide-react';
+import { AppNotification } from './types';
+import { Gift, Bell, X, Wallet, Swords } from 'lucide-react';
 
 function MainLayout() {
-  const { activeTab, isLoggedIn, authLoading } = useGame();
+  const { activeTab, setActiveTab, isLoggedIn, authLoading, notifications, markNotificationsRead } = useGame();
+  const [bannerQueue, setBannerQueue] = useState<AppNotification[]>([]);
+  const shownIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      shownIdsRef.current.clear();
+      setBannerQueue([]);
+      return;
+    }
+
+    const newlyArrived = notifications.filter((n) => !n.read && !shownIdsRef.current.has(n.id));
+    if (newlyArrived.length === 0) return;
+
+    const newIds = newlyArrived.map((n) => n.id);
+    newIds.forEach((id) => shownIdsRef.current.add(id));
+    setBannerQueue((prev) => [...newlyArrived, ...prev].slice(0, 4));
+
+    // Mark as read on the server once displayed to the player
+    const markTimer = setTimeout(() => {
+      void markNotificationsRead(newIds);
+    }, 1500);
+
+    return () => clearTimeout(markTimer);
+  }, [isLoggedIn, notifications, markNotificationsRead]);
 
   if (authLoading) {
     return (
@@ -44,6 +69,65 @@ function MainLayout() {
     <div className="min-h-screen bg-[#0c0d10] text-neutral-100 flex flex-col font-sans selection:bg-red-600 selection:text-white">
       {/* Top Bar */}
       <Navbar />
+
+      {/* Unread / Live In-App Notifications Toast Stack */}
+      {bannerQueue.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[80] max-w-sm w-[calc(100%-2rem)] space-y-2">
+          {bannerQueue.map((notif) => (
+            <div
+              key={notif.id}
+              className="rounded-2xl bg-[#14151c] border border-yellow-500/60 p-4 shadow-2xl shadow-black/80 flex items-start gap-3 animate-in fade-in slide-in-from-bottom-3"
+            >
+              <div className="w-9 h-9 rounded-xl bg-yellow-500/20 border border-yellow-500/40 flex items-center justify-center text-yellow-400 shrink-0 mt-0.5">
+                {notif.type === 'bonus' ? <Gift className="w-4 h-4" /> : <Bell className="w-4 h-4" />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-xs font-black text-white">{notif.title}</span>
+                  <button
+                    type="button"
+                    aria-label="Fechar notificação"
+                    onClick={() => setBannerQueue((prev) => prev.filter((item) => item.id !== notif.id))}
+                    className="text-neutral-400 hover:text-white p-0.5 rounded"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <p className="text-[11px] text-neutral-300 mt-0.5 leading-snug">{notif.body}</p>
+                <div className="flex items-center justify-between gap-2 mt-2">
+                  <span className="text-[10px] text-neutral-500">{notif.createdAt}</span>
+                  {(notif.type === 'bonus' || notif.type === 'deposit' || notif.type === 'withdraw') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('wallet');
+                        setBannerQueue((prev) => prev.filter((item) => item.id !== notif.id));
+                      }}
+                      className="text-[10px] font-bold text-yellow-400 hover:text-yellow-300 flex items-center gap-1"
+                    >
+                      <Wallet className="w-3 h-3" />
+                      Ver Carteira
+                    </button>
+                  )}
+                  {notif.type === 'invite' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('rooms');
+                        setBannerQueue((prev) => prev.filter((item) => item.id !== notif.id));
+                      }}
+                      className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
+                    >
+                      <Swords className="w-3 h-3" />
+                      Ver Salas
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 pb-16">

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nti-static-v3';
+const CACHE_NAME = 'nti-static-v4';
 
 const PRECACHE_URLS = [
   '/',
@@ -130,3 +130,68 @@ self.addEventListener('fetch', (event) => {
     })()
   );
 });
+
+self.addEventListener('push', (event) => {
+  let payload = {
+    title: 'N – Não Te Irrites',
+    body: 'Tem uma nova notificação na sua conta.',
+    url: '/?tab=wallet',
+    tag: 'nti-notification'
+  };
+
+  if (event.data) {
+    try {
+      const parsed = event.data.json();
+      if (parsed && typeof parsed === 'object') {
+        payload = {
+          title: parsed.title || payload.title,
+          body: parsed.body || payload.body,
+          url: parsed.url || payload.url,
+          tag: parsed.tag || payload.tag
+        };
+      }
+    } catch {
+      const text = event.data.text();
+      if (text) payload.body = text;
+    }
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      tag: payload.tag,
+      renotify: true,
+      data: { url: payload.url || '/?tab=wallet' }
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetPath = (event.notification.data && event.notification.data.url) || '/?tab=wallet';
+  const targetUrl = new URL(targetPath, self.location.origin).href;
+
+  event.waitUntil(
+    (async () => {
+      const windowClients = await self.clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true
+      });
+      for (const client of windowClients) {
+        if (client.url.startsWith(self.location.origin) && 'focus' in client) {
+          if ('navigate' in client && typeof client.navigate === 'function') {
+            await client.navigate(targetUrl).catch(() => undefined);
+          }
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+      return undefined;
+    })()
+  );
+});
+

@@ -25,9 +25,10 @@ import {
   Palette,
   RotateCcw,
   RefreshCw,
-  Trophy
+  Trophy,
+  Gift
 } from 'lucide-react';
-import { Transaction, BoardThemeId, ThemePriceConfig } from '../types';
+import { Transaction, BoardThemeId, ThemePriceConfig, Currency } from '../types';
 import { BOARD_THEME_LIST } from '../utils/boardThemes';
 
 export const AdminPanel: React.FC = () => {
@@ -41,6 +42,7 @@ export const AdminPanel: React.FC = () => {
     adminRejectDeposit,
     adminApproveWithdrawal,
     adminRejectWithdrawal,
+    adminGrantBonus,
     adminReplySupport,
     adminToggleUserSuspension,
     joinRoom,
@@ -55,7 +57,7 @@ export const AdminPanel: React.FC = () => {
     logout
   } = useGame();
 
-  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'treasury' | 'rooms' | 'support' | 'payments' | 'rules'>('kpis');
+  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'bonus' | 'treasury' | 'rooms' | 'support' | 'payments' | 'rules'>('kpis');
   const [searchTerm, setSearchTerm] = useState('');
   const [adminReplyText, setAdminReplyText] = useState('');
   const [activeTicketId, setActiveTicketId] = useState<string>(supportTickets[0]?.id || '');
@@ -63,6 +65,15 @@ export const AdminPanel: React.FC = () => {
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [adminActionError, setAdminActionError] = useState<string | null>(null);
   const [isRefreshingOverview, setIsRefreshingOverview] = useState(false);
+
+  // Bonus form state
+  const [bonusUserId, setBonusUserId] = useState<string>('');
+  const [bonusCurrency, setBonusCurrency] = useState<Currency>('KZ');
+  const [bonusAmount, setBonusAmount] = useState<number>(5000);
+  const [bonusReason, setBonusReason] = useState<string>('');
+  const [bonusConfirmOpen, setBonusConfirmOpen] = useState<boolean>(false);
+  const [bonusSuccessMsg, setBonusSuccessMsg] = useState<string | null>(null);
+  const [bonusErrorMsg, setBonusErrorMsg] = useState<string | null>(null);
 
   // Payment configuration form state
   const [mcxEntity, setMcxEntity] = useState(paymentSettings.mcxEntity);
@@ -116,6 +127,23 @@ export const AdminPanel: React.FC = () => {
   const allTransactions = adminOverview?.transactions ?? transactions;
   const allTickets = adminOverview?.supportTickets ?? supportTickets;
   const allMatches = adminOverview?.matchHistory ?? [];
+
+  const grantedBonuses = useMemo(
+    () => allTransactions.filter((t) => t.type === 'bonus'),
+    [allTransactions]
+  );
+
+  const selectedBonusPlayer = useMemo(
+    () => allPlayers.find((p) => p.id === bonusUserId) || null,
+    [allPlayers, bonusUserId]
+  );
+
+  useEffect(() => {
+    if (allPlayers.length > 0 && !allPlayers.some((p) => p.id === bonusUserId)) {
+      const firstActive = allPlayers.find((p) => !p.isSuspended) || allPlayers[0];
+      if (firstActive) setBonusUserId(firstActive.id);
+    }
+  }, [allPlayers, bonusUserId]);
 
   useEffect(() => {
     if (allTickets.length > 0 && !allTickets.some(t => t.id === activeTicketId)) {
@@ -216,7 +244,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const handleExportCsv = () => {
-    const headers = ['ID', 'Jogador', 'Tipo', 'Moeda', 'Valor', 'Taxa', 'Metodo', 'Referencia', 'Estado', 'Data'];
+    const headers = ['ID', 'Jogador', 'Tipo', 'Moeda', 'Valor', 'Taxa', 'Metodo', 'Referencia', 'Motivo', 'Concedido Por', 'Estado', 'Data'];
     const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
     const rows = allTransactions.map(t => [
       t.id,
@@ -227,6 +255,8 @@ export const AdminPanel: React.FC = () => {
       t.fee,
       t.method,
       t.reference,
+      t.reason || t.notes || '',
+      t.grantedBy || '',
       t.status,
       t.createdAt
     ]);
@@ -405,6 +435,7 @@ export const AdminPanel: React.FC = () => {
           { id: 'kpis', label: 'A. Dashboard Geral', icon: TrendingUp },
           { id: 'players', label: `B. Gestão Jogadores (${totalUsers})`, icon: Users },
           { id: 'finances', label: `C. Validações (${pendingDeposits.length + pendingWithdrawals.length})`, icon: DollarSign },
+          { id: 'bonus', label: `🎁 Conceder Bónus (${grantedBonuses.length})`, icon: Gift },
           { id: 'treasury', label: 'D. Tesouraria (Banca N)', icon: FileText },
           { id: 'rooms', label: `E. Mesas & Histórico (${rooms.length})`, icon: Swords },
           { id: 'support', label: `F. Mensagens Suporte (${allTickets.length})`, icon: MessageSquare },
@@ -766,6 +797,224 @@ export const AdminPanel: React.FC = () => {
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* C.2 CONCEDER BÓNUS */}
+      {adminTab === 'bonus' && (
+        <div className="space-y-6">
+          <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800 pb-4">
+              <div>
+                <span className="text-[10px] uppercase font-black tracking-widest text-yellow-400 block">
+                  Crédito Direto em Saldo Real (Transação SQL Atómica)
+                </span>
+                <h2 className="text-xl font-black text-white flex items-center gap-2 mt-0.5">
+                  <Gift className="w-5 h-5 text-yellow-400" />
+                  Conceder Bónus a Jogador
+                </h2>
+                <p className="text-xs text-neutral-400 mt-1">
+                  O bónus credita imediatamente o saldo real do jogador, regista na carteira e envia notificação em tempo real + Web Push.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                className="text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-3 py-2 rounded-lg flex items-center gap-1.5 font-bold shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Exportar Relatório (CSV)
+              </button>
+            </div>
+
+            {bonusErrorMsg && (
+              <div className="p-3.5 rounded-xl bg-red-950/80 border border-red-500 text-red-200 text-xs font-bold">
+                {bonusErrorMsg}
+              </div>
+            )}
+
+            {bonusSuccessMsg && (
+              <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500 text-emerald-200 text-xs font-bold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{bonusSuccessMsg}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                setBonusErrorMsg(null);
+                setBonusSuccessMsg(null);
+                if (!selectedBonusPlayer) {
+                  setBonusErrorMsg('Selecione um jogador válido.');
+                  return;
+                }
+                if (selectedBonusPlayer.isSuspended) {
+                  setBonusErrorMsg('Não é possível conceder bónus a uma conta suspensa.');
+                  return;
+                }
+                const maxPerOp = bonusCurrency === 'KZ' ? 5_000_000 : 5_000;
+                if (!Number.isFinite(bonusAmount) || bonusAmount <= 0) {
+                  setBonusErrorMsg('O valor do bónus deve ser superior a zero.');
+                  return;
+                }
+                if (bonusAmount > maxPerOp) {
+                  setBonusErrorMsg(
+                    `Limite máximo por operação: ${maxPerOp.toLocaleString('pt-AO')} ${bonusCurrency === 'KZ' ? 'Kz' : 'USDT'}.`
+                  );
+                  return;
+                }
+                setBonusConfirmOpen(true);
+              }}
+              className="grid grid-cols-1 md:grid-cols-2 gap-4"
+            >
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Escolher Jogador:
+                </label>
+                <select
+                  value={bonusUserId}
+                  onChange={(e) => setBonusUserId(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-yellow-500"
+                >
+                  {allPlayers.length === 0 ? (
+                    <option value="">Nenhum jogador registado</option>
+                  ) : (
+                    allPlayers.map((p) => (
+                      <option key={p.id} value={p.id} disabled={p.isSuspended}>
+                        {p.name} ({p.phone}) · {p.kzBalance.toLocaleString('pt-AO')} Kz / {p.usdtBalance} USDT
+                        {p.isSuspended ? ' [SUSPENSO]' : ''}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Moeda do Bónus:
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBonusCurrency('KZ');
+                      if (bonusAmount < 100) setBonusAmount(5000);
+                    }}
+                    className={`py-2.5 rounded-xl border text-xs font-black transition-all ${
+                      bonusCurrency === 'KZ'
+                        ? 'bg-red-600 border-red-500 text-white'
+                        : 'bg-neutral-950 border-neutral-700 text-neutral-300 hover:border-neutral-600'
+                    }`}
+                  >
+                    Kwanza (KZ)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBonusCurrency('USDT');
+                      if (bonusAmount > 5000) setBonusAmount(10);
+                    }}
+                    className={`py-2.5 rounded-xl border text-xs font-black transition-all ${
+                      bonusCurrency === 'USDT'
+                        ? 'bg-emerald-600 border-emerald-500 text-white'
+                        : 'bg-neutral-950 border-neutral-700 text-neutral-300 hover:border-neutral-600'
+                    }`}
+                  >
+                    Tether (USDT)
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Valor ({bonusCurrency === 'KZ' ? 'Máx 5.000.000 Kz' : 'Máx 5.000 USDT'}):
+                </label>
+                <input
+                  type="number"
+                  min={bonusCurrency === 'KZ' ? 1 : 0.01}
+                  max={bonusCurrency === 'KZ' ? 5000000 : 5000}
+                  step={bonusCurrency === 'KZ' ? 1 : 0.01}
+                  required
+                  value={bonusAmount}
+                  onChange={(e) => setBonusAmount(Number(e.target.value))}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-sm font-mono font-bold text-yellow-400 focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-neutral-300 block mb-1">
+                  Motivo <span className="text-[10px] text-neutral-500 font-normal">(opcional)</span>:
+                </label>
+                <input
+                  type="text"
+                  maxLength={140}
+                  value={bonusReason}
+                  onChange={(e) => setBonusReason(e.target.value)}
+                  placeholder="Ex: Bónus de Boas-Vindas / Prémio Torneio"
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div className="md:col-span-2 flex justify-end pt-2">
+                <button
+                  type="submit"
+                  disabled={busyActionId === 'grant_bonus' || allPlayers.length === 0}
+                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-xl shadow-red-950 disabled:opacity-50"
+                >
+                  <Gift className="w-4 h-4" />
+                  <span>{busyActionId === 'grant_bonus' ? 'A PROCESSAR...' : 'Conceder Bónus'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* Granted Bonuses List */}
+          <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white">Bónus Concedidos ({grantedBonuses.length})</h3>
+              <span className="text-xs text-neutral-400">Incluídos na exportação CSV</span>
+            </div>
+
+            {grantedBonuses.length === 0 ? (
+              <p className="text-xs text-neutral-500 py-6 text-center">
+                Ainda não foram concedidos bónus pela administração.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-neutral-950 text-neutral-400 border-b border-neutral-800 uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th className="p-3">Data</th>
+                      <th className="p-3">Jogador</th>
+                      <th className="p-3">Valor</th>
+                      <th className="p-3">Motivo</th>
+                      <th className="p-3">Admin</th>
+                      <th className="p-3">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800/80">
+                    {grantedBonuses.map((tx) => (
+                      <tr key={tx.id} className="hover:bg-neutral-800/40">
+                        <td className="p-3 text-neutral-400 whitespace-nowrap">{tx.createdAt}</td>
+                        <td className="p-3 font-bold text-white">{tx.userName}</td>
+                        <td className="p-3 font-bold text-emerald-400 tabular-nums whitespace-nowrap">
+                          +{tx.amount.toLocaleString('pt-AO')} {tx.currency}
+                        </td>
+                        <td className="p-3 text-neutral-300">{tx.reason || tx.notes || 'Bónus administrativo'}</td>
+                        <td className="p-3 text-yellow-400 font-semibold">{tx.grantedBy || 'Administrador N'}</td>
+                        <td className="p-3">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                            {tx.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
@@ -1693,6 +1942,71 @@ export const AdminPanel: React.FC = () => {
                 className="py-2.5 px-4 bg-neutral-800 text-neutral-300 font-bold text-xs rounded-xl hover:bg-neutral-700"
               >
                 Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BONUS CONFIRMATION MODAL */}
+      {bonusConfirmOpen && selectedBonusPlayer && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-neutral-900 border-2 border-yellow-500/60 rounded-2xl p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-yellow-500/20 border border-yellow-500/40 flex items-center justify-center text-yellow-400 shrink-0">
+                <Gift className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-white">Confirmar Bónus</h3>
+                <p className="text-xs text-neutral-300 mt-0.5">
+                  Conceder <b className="text-yellow-400">{bonusAmount.toLocaleString('pt-AO')} {bonusCurrency === 'KZ' ? 'Kz' : 'USDT'}</b> a{' '}
+                  <b className="text-white">{selectedBonusPlayer.name}</b>?
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 text-xs space-y-1 text-neutral-300">
+              <p><b>Jogador:</b> {selectedBonusPlayer.name} ({selectedBonusPlayer.phone})</p>
+              <p><b>Valor a creditar:</b> +{bonusAmount.toLocaleString('pt-AO')} {bonusCurrency === 'KZ' ? 'Kz' : 'USDT'}</p>
+              {bonusReason.trim() && <p><b>Motivo:</b> {bonusReason.trim()}</p>}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={busyActionId === 'grant_bonus'}
+                onClick={() => setBonusConfirmOpen(false)}
+                className="flex-1 py-2.5 bg-neutral-800 text-neutral-300 font-bold text-xs rounded-xl hover:bg-neutral-700 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={busyActionId === 'grant_bonus'}
+                onClick={async () => {
+                  if (busyActionId === 'grant_bonus') return;
+                  setBusyActionId('grant_bonus');
+                  setBonusErrorMsg(null);
+                  const res = await adminGrantBonus({
+                    userId: selectedBonusPlayer.id,
+                    currency: bonusCurrency,
+                    amount: bonusAmount,
+                    reason: bonusReason.trim() || undefined
+                  });
+                  setBusyActionId(null);
+                  setBonusConfirmOpen(false);
+                  if (!res.ok) {
+                    setBonusErrorMsg(res.error || 'Não foi possível conceder o bónus.');
+                    return;
+                  }
+                  setBonusSuccessMsg(
+                    `Bónus de ${bonusAmount.toLocaleString('pt-AO')} ${bonusCurrency === 'KZ' ? 'Kz' : 'USDT'} concedido a ${selectedBonusPlayer.name}!`
+                  );
+                  setBonusReason('');
+                }}
+                className="flex-1 py-2.5 bg-gradient-to-r from-red-600 to-yellow-500 text-white font-black text-xs rounded-xl hover:brightness-110 disabled:opacity-50"
+              >
+                {busyActionId === 'grant_bonus' ? 'A conceder...' : 'Confirmar Crédito'}
               </button>
             </div>
           </div>
