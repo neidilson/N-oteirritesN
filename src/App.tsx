@@ -13,6 +13,7 @@ import { WalletView } from './components/WalletView';
 import { RankingView } from './components/RankingView';
 import { SupportView } from './components/SupportView';
 import { AdminPanel } from './components/AdminPanel';
+import { PalancaJetView } from './components/PalancaJetView';
 import { AuthView } from './components/AuthView';
 import { AppNotification } from './types';
 import { Gift, Bell, X, Wallet, Swords } from 'lucide-react';
@@ -96,7 +97,7 @@ function MainLayout() {
                 <p className="text-[11px] text-neutral-300 mt-0.5 leading-snug">{notif.body}</p>
                 <div className="flex items-center justify-between gap-2 mt-2">
                   <span className="text-[10px] text-neutral-500">{notif.createdAt}</span>
-                  {(notif.type === 'bonus' || notif.type === 'deposit' || notif.type === 'withdraw') && (
+                  {(notif.type === 'bonus' || notif.type === 'deposit' || notif.type === 'withdraw' || notif.type === 'system') && (
                     <button
                       type="button"
                       onClick={() => {
@@ -134,6 +135,7 @@ function MainLayout() {
         {activeTab === 'dashboard' && <DashboardView />}
         {activeTab === 'game' && <LudoBoard />}
         {activeTab === 'rooms' && <RoomsView />}
+        {activeTab === 'jet' && <PalancaJetView />}
         {activeTab === 'wallet' && <WalletView />}
         {activeTab === 'ranking' && <RankingView />}
         {activeTab === 'support' && <SupportView />}

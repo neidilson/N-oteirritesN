@@ -26,10 +26,18 @@ import {
   RotateCcw,
   RefreshCw,
   Trophy,
-  Gift
+  Gift,
+  Plane
 } from 'lucide-react';
-import { Transaction, BoardThemeId, ThemePriceConfig, Currency } from '../types';
+import {
+  Transaction,
+  BoardThemeId,
+  ThemePriceConfig,
+  Currency,
+  PalancaJetConfig
+} from '../types';
 import { BOARD_THEME_LIST } from '../utils/boardThemes';
+import { DEFAULT_JET_CONFIG, sanitizeJetConfig } from '../utils/palancaJetEngine';
 
 export const AdminPanel: React.FC = () => {
   const {
@@ -57,7 +65,7 @@ export const AdminPanel: React.FC = () => {
     logout
   } = useGame();
 
-  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'bonus' | 'treasury' | 'rooms' | 'support' | 'payments' | 'rules'>('kpis');
+  const [adminTab, setAdminTab] = useState<'kpis' | 'players' | 'finances' | 'bonus' | 'treasury' | 'rooms' | 'support' | 'payments' | 'rules' | 'jet'>('kpis');
   const [searchTerm, setSearchTerm] = useState('');
   const [adminReplyText, setAdminReplyText] = useState('');
   const [activeTicketId, setActiveTicketId] = useState<string>(supportTickets[0]?.id || '');
@@ -98,6 +106,17 @@ export const AdminPanel: React.FC = () => {
   const [rulesSavedFeedback, setRulesSavedFeedback] = useState(false);
   const [rulesError, setRulesError] = useState<string | null>(null);
 
+  // Palanca Jet & Minimum Withdrawal configuration draft state
+  const [jetDraft, setJetDraft] = useState<PalancaJetConfig>(
+    () => sanitizeJetConfig(platformConfig.jetConfig)
+  );
+  const [minWithdrawKzDraft, setMinWithdrawKzDraft] = useState<number>(
+    () => platformConfig.minWithdrawKz ?? 500
+  );
+  const [jetSavedFeedback, setJetSavedFeedback] = useState(false);
+  const [jetConfigError, setJetConfigError] = useState<string | null>(null);
+  const [savingJetConfig, setSavingJetConfig] = useState(false);
+
   useEffect(() => {
     if (isAdminUnlocked) {
       void refreshAdminOverview();
@@ -121,6 +140,8 @@ export const AdminPanel: React.FC = () => {
     setWinnerPctDraft(platformConfig.winnerPercent);
     setCommPctDraft(platformConfig.commissionPercent);
     setThemePricesDraft(platformConfig.themePrices);
+    setJetDraft(sanitizeJetConfig(platformConfig.jetConfig));
+    setMinWithdrawKzDraft(platformConfig.minWithdrawKz ?? 500);
   }, [platformConfig]);
 
   const allPlayers = adminOverview?.players ?? [];
@@ -440,7 +461,8 @@ export const AdminPanel: React.FC = () => {
           { id: 'rooms', label: `E. Mesas & Histórico (${rooms.length})`, icon: Swords },
           { id: 'support', label: `F. Mensagens Suporte (${allTickets.length})`, icon: MessageSquare },
           { id: 'payments', label: 'G. Formas de Pagamento (IBAN/MCX)', icon: CreditCard },
-          { id: 'rules', label: 'H. Taxas & Tabuleiros', icon: Percent }
+          { id: 'rules', label: 'H. Taxas & Tabuleiros', icon: Percent },
+          { id: 'jet', label: 'I. Palanca Jet & RTP', icon: Plane }
         ].map((tab) => {
           const Icon = tab.icon;
           return (
@@ -594,7 +616,9 @@ export const AdminPanel: React.FC = () => {
                       </td>
                       <td className="p-3 font-mono text-neutral-300">{player.phone}</td>
                       <td className="p-3 font-semibold text-yellow-400">{player.category}</td>
-                      <td className="p-3 tabular-nums font-bold text-white">{player.kzBalance.toLocaleString('pt-AO')} Kz</td>
+                      <td className="p-3 tabular-nums font-bold text-white">
+                        <span>{player.kzBalance.toLocaleString('pt-AO')} Kz</span>
+                      </td>
                       <td className="p-3 tabular-nums font-bold text-emerald-400">{player.usdtBalance} USDT</td>
                       <td className="p-3 text-neutral-300">{player.matchesPlayed} / {player.wins}</td>
                       <td className="p-3">
@@ -1165,9 +1189,11 @@ export const AdminPanel: React.FC = () => {
                       <tr key={m.id} className="hover:bg-neutral-800/40">
                         <td className="p-3">
                           <span className="font-bold text-white block">{m.roomName}</span>
-                          <span className="text-[10px] font-mono text-neutral-400">{m.roomCode} · {m.players.length} jog.</span>
+                          <span className="text-[10px] font-mono text-neutral-400">
+                            {m.roomCode} · {m.gameType === 'palanca_jet' ? 'Palanca Jet' : m.gameType === 'puzzle_angola' ? 'Puzzle (Hist.)' : `${m.players.length} jog.`}
+                          </span>
                         </td>
-                        <td className="p-3 font-bold text-emerald-400">{m.winnerName || '—'}</td>
+                        <td className="p-3 font-bold text-emerald-400">{m.winnerName || (m.gameType === 'palanca_jet' || m.gameType === 'puzzle_angola' ? 'Banca N' : '—')}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${m.isDemo ? 'bg-sky-950 text-sky-300' : 'bg-amber-950 text-amber-300'}`}>
                             {m.isDemo ? 'Treino' : 'Real'}
@@ -1888,6 +1914,388 @@ export const AdminPanel: React.FC = () => {
               >
                 <Save className="w-4 h-4" />
                 <span>Salvar Percentagens & Preços</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* I. PALANCA JET & RTP DA BANCA */}
+      {adminTab === 'jet' && (
+        <div className="space-y-6">
+          {/* RTP, Real Bets & Bank Profit KPIs */}
+          <div className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800 pb-4">
+              <div>
+                <span className="text-[10px] uppercase font-black tracking-widest text-amber-400 block">
+                  Telemetria Real · Rondas Crash & Banca
+                </span>
+                <h2 className="text-xl font-black text-white flex items-center gap-2 mt-0.5">
+                  <Plane className="w-5 h-5 text-yellow-400" />
+                  Palanca Jet · Estatísticas e Margem da Banca
+                </h2>
+                <p className="text-xs text-neutral-400 mt-1">
+                  Monitorização em tempo real de apostas reais (KZ), prémios pagos, lucro líquido e maiores vitórias.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleManualRefresh}
+                disabled={isRefreshingOverview}
+                className="px-3.5 py-2 rounded-xl bg-neutral-950 hover:bg-neutral-800 border border-neutral-700 text-xs font-bold text-neutral-200 flex items-center gap-1.5 shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingOverview ? 'animate-spin' : ''}`} />
+                <span>Atualizar RTP</span>
+              </button>
+            </div>
+
+            {(() => {
+              const st = adminOverview?.jetStats || {
+                totalRealBets: 0,
+                totalRealWageredKz: 0,
+                totalRealPayoutKz: 0,
+                houseProfitKz: 0,
+                rtpPercent: 0,
+                roundsToday: 0,
+                totalRounds: 0,
+                biggestWins: []
+              };
+              const houseMargin = st.totalRealWageredKz > 0 ? 100 - st.rtpPercent : 0;
+              return (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800">
+                      <span className="text-[10px] text-neutral-400 uppercase font-bold block">Rondas Hoje / Total</span>
+                      <span className="text-xl font-black text-white tabular-nums block mt-1">
+                        {st.roundsToday.toLocaleString('pt-AO')}
+                      </span>
+                      <span className="text-[10px] text-neutral-400 block mt-1">
+                        {st.totalRounds.toLocaleString('pt-AO')} rondas totais · {st.totalRealBets} apostas reais
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800">
+                      <span className="text-[10px] text-neutral-400 uppercase font-bold block">Total Apostado (KZ)</span>
+                      <span className="text-xl font-black text-amber-400 tabular-nums block mt-1">
+                        {st.totalRealWageredKz.toLocaleString('pt-AO')} Kz
+                      </span>
+                      <span className="text-[10px] text-neutral-500 block mt-1">
+                        Volume real em voos
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800">
+                      <span className="text-[10px] text-neutral-400 uppercase font-bold block">Prémios Pagos (KZ)</span>
+                      <span className="text-xl font-black text-emerald-400 tabular-nums block mt-1">
+                        {st.totalRealPayoutKz.toLocaleString('pt-AO')} Kz
+                      </span>
+                      <span className="text-[10px] text-neutral-500 block mt-1">
+                        Levantamentos no voo
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800">
+                      <span className="text-[10px] text-neutral-400 uppercase font-bold block">Lucro da Banca</span>
+                      <span className={`text-xl font-black tabular-nums block mt-1 ${st.houseProfitKz >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                        {st.houseProfitKz.toLocaleString('pt-AO')} Kz
+                      </span>
+                      <span className="text-[10px] text-neutral-500 block mt-1">
+                        Apostado − Prémios
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-cyan-800/40">
+                      <span className="text-[10px] text-cyan-300 uppercase font-bold block">RTP Real Observado</span>
+                      <span className="text-2xl font-black text-cyan-300 tabular-nums block mt-1">
+                        {st.rtpPercent.toFixed(1)}%
+                      </span>
+                      <span className="text-[10px] text-neutral-500 block mt-1">
+                        Teórico: {(100 - jetDraft.houseEdgePercent).toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-neutral-950 border border-red-800/40">
+                      <span className="text-[10px] text-red-300 uppercase font-bold block">Margem Observada</span>
+                      <span className="text-2xl font-black text-red-400 tabular-nums block mt-1">
+                        {houseMargin.toFixed(1)}%
+                      </span>
+                      <span className="text-[10px] text-neutral-500 block mt-1">
+                        Alvo: {jetDraft.houseEdgePercent}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Biggest Wins Table */}
+                  <div className="pt-2 space-y-2">
+                    <h3 className="text-sm font-black text-white">Maiores Vitórias no Palanca Jet</h3>
+                    {st.biggestWins.length === 0 ? (
+                      <p className="text-xs text-neutral-500 py-3">
+                        Ainda não existem vitórias reais registadas no Palanca Jet.
+                      </p>
+                    ) : (
+                      <div className="overflow-x-auto rounded-xl border border-neutral-800 bg-neutral-950">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-neutral-900 text-neutral-400 border-b border-neutral-800 uppercase text-[10px]">
+                            <tr>
+                              <th className="p-3">Ronda</th>
+                              <th className="p-3">Jogador</th>
+                              <th className="p-3">Aposta</th>
+                              <th className="p-3">Multiplicador</th>
+                              <th className="p-3">Ganho</th>
+                              <th className="p-3">Data</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-neutral-800/80">
+                            {st.biggestWins.map((win) => (
+                              <tr key={win.id} className="hover:bg-neutral-900/50">
+                                <td className="p-3 font-mono font-bold text-yellow-400">#{win.roundNumber}</td>
+                                <td className="p-3 font-bold text-white">{win.maskedName}</td>
+                                <td className="p-3 font-mono tabular-nums text-neutral-300">
+                                  {win.amount.toLocaleString('pt-AO')} Kz
+                                </td>
+                                <td className="p-3 font-mono font-black text-cyan-300">
+                                  {win.cashoutMultiplier.toFixed(2)}x
+                                </td>
+                                <td className="p-3 font-mono font-black text-emerald-400 tabular-nums">
+                                  +{win.payout.toLocaleString('pt-AO')} Kz
+                                </td>
+                                <td className="p-3 text-neutral-400 whitespace-nowrap">{win.createdAt}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+
+          {/* Palanca Jet Live Parameters Form */}
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (savingJetConfig) return;
+              setJetConfigError(null);
+              setJetSavedFeedback(false);
+
+              const clampedEdge = Math.min(8, Math.max(4, Math.round(jetDraft.houseEdgePercent * 10) / 10));
+              const nextJet = sanitizeJetConfig({
+                ...jetDraft,
+                houseEdgePercent: clampedEdge
+              });
+              const nextMinWithdraw = Math.max(100, Math.round(Number(minWithdrawKzDraft) || 500));
+
+              setSavingJetConfig(true);
+              const res = await updatePlatformConfig({
+                minWithdrawKz: nextMinWithdraw,
+                jetConfig: nextJet
+              });
+              setSavingJetConfig(false);
+              if (!res.ok) {
+                setJetConfigError(res.error || 'Erro ao guardar configurações do Palanca Jet.');
+                return;
+              }
+              setJetDraft(nextJet);
+              setMinWithdrawKzDraft(nextMinWithdraw);
+              setJetSavedFeedback(true);
+              setTimeout(() => setJetSavedFeedback(false), 4000);
+            }}
+            className="rounded-2xl p-6 bg-neutral-900 border border-neutral-800 space-y-6"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800 pb-4">
+              <div>
+                <h3 className="text-lg font-black text-white">Configurações do Palanca Jet & Levantamento Mínimo</h3>
+                <p className="text-xs text-neutral-400 mt-0.5">
+                  As alterações são aplicadas nas próximas rondas e propagadas via WebSocket sem reinício do servidor.
+                </p>
+              </div>
+              <button
+                type="submit"
+                disabled={savingJetConfig}
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-red-950 shrink-0 disabled:opacity-60"
+              >
+                <Save className="w-4 h-4" />
+                <span>{savingJetConfig ? 'A Guardar...' : 'Guardar Config. Palanca Jet'}</span>
+              </button>
+            </div>
+
+            {jetConfigError && (
+              <div className="p-3 rounded-xl bg-red-950/80 border border-red-500 text-red-200 text-xs font-bold">
+                {jetConfigError}
+              </div>
+            )}
+
+            {jetSavedFeedback && (
+              <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500 text-emerald-200 text-xs flex items-center gap-2 font-bold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>Configuração do Palanca Jet, RTP e levantamento mínimo guardada em tempo real!</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Estado do Jogo</label>
+                <button
+                  type="button"
+                  onClick={() => setJetDraft((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                  className={`w-full py-2.5 px-3 rounded-xl text-xs font-black border transition-all ${
+                    jetDraft.enabled
+                      ? 'bg-emerald-950/70 border-emerald-500 text-emerald-300'
+                      : 'bg-red-950/70 border-red-500 text-red-300'
+                  }`}
+                >
+                  {jetDraft.enabled ? 'ATIVO (Apostas Abertas)' : 'PAUSADO (Manutenção)'}
+                </button>
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Modo a Dinheiro Real</label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setJetDraft((prev) => ({ ...prev, realMoneyEnabled: !prev.realMoneyEnabled }))
+                  }
+                  className={`w-full py-2.5 px-3 rounded-xl text-xs font-black border transition-all ${
+                    jetDraft.realMoneyEnabled
+                      ? 'bg-emerald-950/70 border-emerald-500 text-emerald-300'
+                      : 'bg-amber-950/70 border-amber-500 text-amber-300'
+                  }`}
+                >
+                  {jetDraft.realMoneyEnabled ? 'ATIVO (Real + Demo)' : 'PAUSADO (Só Demo)'}
+                </button>
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">
+                  Margem da Casa (4% – 8%) · RTP {(100 - jetDraft.houseEdgePercent).toFixed(1)}%
+                </label>
+                <input
+                  type="number"
+                  min={4}
+                  max={8}
+                  step={0.5}
+                  value={jetDraft.houseEdgePercent}
+                  onChange={(e) =>
+                    setJetDraft((prev) => ({
+                      ...prev,
+                      houseEdgePercent: Math.min(8, Math.max(4, Number(e.target.value) || 5))
+                    }))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-yellow-400 focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">
+                  Levantamento Mínimo (Kz)
+                </label>
+                <input
+                  type="number"
+                  min={100}
+                  max={1000000}
+                  step={100}
+                  value={minWithdrawKzDraft}
+                  onChange={(e) =>
+                    setMinWithdrawKzDraft(Math.max(100, Math.round(Number(e.target.value) || 500)))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Aposta Mínima (Kz)</label>
+                <input
+                  type="number"
+                  min={50}
+                  max={100000}
+                  step={50}
+                  value={jetDraft.minBetKz}
+                  onChange={(e) =>
+                    setJetDraft((prev) => ({
+                      ...prev,
+                      minBetKz: Math.max(50, Math.round(Number(e.target.value) || 100))
+                    }))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-white focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Aposta Máxima (Kz)</label>
+                <input
+                  type="number"
+                  min={100}
+                  max={5000000}
+                  step={500}
+                  value={jetDraft.maxBetKz}
+                  onChange={(e) =>
+                    setJetDraft((prev) => ({
+                      ...prev,
+                      maxBetKz: Math.max(100, Math.round(Number(e.target.value) || 50000))
+                    }))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-white focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Ganho Máximo / Aposta (Kz)</label>
+                <input
+                  type="number"
+                  min={1000}
+                  max={50000000}
+                  step={5000}
+                  value={jetDraft.maxWinKz}
+                  onChange={(e) =>
+                    setJetDraft((prev) => ({
+                      ...prev,
+                      maxWinKz: Math.max(1000, Math.round(Number(e.target.value) || 500000))
+                    }))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-amber-300 focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+                <label className="text-xs font-bold text-neutral-300 block">Tempo de Apostas (seg)</label>
+                <input
+                  type="number"
+                  min={4}
+                  max={30}
+                  step={1}
+                  value={jetDraft.bettingDurationSec}
+                  onChange={(e) =>
+                    setJetDraft((prev) => ({
+                      ...prev,
+                      bettingDurationSec: Math.min(30, Math.max(4, Math.round(Number(e.target.value) || 8)))
+                    }))
+                  }
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-cyan-300 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setJetDraft(DEFAULT_JET_CONFIG);
+                  setMinWithdrawKzDraft(500);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs flex items-center gap-1.5"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Restaurar Padrão (5% Margem)</span>
+              </button>
+              <button
+                type="submit"
+                disabled={savingJetConfig}
+                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-xl shadow-red-950 disabled:opacity-60"
+              >
+                <Save className="w-4 h-4" />
+                <span>{savingJetConfig ? 'A Guardar...' : 'Guardar Config. Palanca Jet'}</span>
               </button>
             </div>
           </form>

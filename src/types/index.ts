@@ -35,12 +35,15 @@ export interface User {
   avatar: string;
   role: UserRole;
   category: PlayerCategory;
-  kzBalance: number; // Saldo Real em Kwanzas (inicia a zero)
-  usdtBalance: number; // Saldo Real em USDT (inicia a zero)
+  kzBalance: number; // Saldo Real em Kwanzas (levantável)
+  usdtBalance: number; // Saldo Real em USDT
   demoKzBalance?: number; // Saldo Simulado/Demo em Kwanzas para treinar
   demoUsdtBalance?: number; // Saldo Simulado/Demo em USDT
   kzReserved: number;
   usdtReserved: number;
+  dailyEntryLimitKz?: number | null; // Limite diário de apostas reais em KZ
+  dailyLossLimitKz?: number | null; // Limite diário de perdas líquidas reais em KZ
+  selfExcludedUntil?: string | null; // Data ISO até quando o jogador está em autoexclusão temporária
   matchesPlayed: number;
   wins: number;
   losses: number;
@@ -151,6 +154,10 @@ export type TransactionType =
   | 'BET_WIN'
   | 'COMMISSION'
   | 'THEME_UNLOCK'
+  | 'JET_BET'
+  | 'JET_WIN'
+  | 'JET_LOSS'
+  | 'JET_REFUND'
   | 'bonus';
 
 export type TransactionStatus =
@@ -248,10 +255,97 @@ export interface ThemePriceConfig {
   priceUsdt: number;
 }
 
+export type PalancaJetPhase = 'BETTING' | 'FLYING' | 'CRASHED';
+
+export interface PalancaJetConfig {
+  enabled: boolean;
+  realMoneyEnabled: boolean;
+  houseEdgePercent: number; // 4..8% por defeito (padrão 5%)
+  minBetKz: number;
+  maxBetKz: number;
+  maxWinKz: number;
+  bettingDurationSec: number;
+}
+
+export type PalancaJetBetStatus = 'PLACED' | 'CASHED_OUT' | 'LOST' | 'CANCELLED' | 'REFUNDED';
+
+export interface PalancaJetBet {
+  id: string;
+  roundId: string;
+  userId: string;
+  maskedName: string;
+  slot: 0 | 1;
+  isDemo: boolean;
+  amount: number;
+  autoCashoutMultiplier: number | null;
+  cashoutMultiplier: number | null;
+  payout: number;
+  status: PalancaJetBetStatus;
+  createdAt: string;
+}
+
+export interface PalancaJetHistoryRound {
+  id: string;
+  roundNumber: number;
+  seedHash: string;
+  serverSeed: string;
+  crashPoint: number;
+  houseEdgePercent: number;
+  crashedAt: string;
+}
+
+export interface PalancaJetChatMessage {
+  id: string;
+  userId: string;
+  userName: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface PalancaJetPublicState {
+  phase: PalancaJetPhase;
+  roundId: string;
+  roundNumber: number;
+  seedHash: string;
+  serverSeed: string | null; // Revelada apenas após CRASHED
+  crashPoint: number | null; // Revelado apenas após CRASHED
+  houseEdgePercent: number;
+  multiplier: number;
+  bettingRemainingMs: number;
+  elapsedMs: number;
+  serverNowMs: number;
+  bets: PalancaJetBet[];
+  history: PalancaJetHistoryRound[];
+  chat: PalancaJetChatMessage[];
+}
+
+export interface PalancaJetBiggestWin {
+  id: string;
+  roundNumber: number;
+  maskedName: string;
+  amount: number;
+  cashoutMultiplier: number;
+  payout: number;
+  createdAt: string;
+}
+
+export interface PalancaJetAdminStats {
+  totalRealBets: number;
+  totalRealWageredKz: number;
+  totalRealPayoutKz: number;
+  houseProfitKz: number;
+  rtpPercent: number;
+  roundsToday: number;
+  totalRounds: number;
+  biggestWins: PalancaJetBiggestWin[];
+}
+
 export interface PlatformConfig {
   winnerPercent: number;
   commissionPercent: number;
   themePrices: Record<BoardThemeId, ThemePriceConfig>;
+  minWithdrawKz: number;
+  jetConfig: PalancaJetConfig;
 }
 
 export interface MatchHistoryPlayer {
@@ -264,6 +358,7 @@ export interface MatchHistoryPlayer {
 
 export interface MatchHistoryEntry {
   id: string;
+  gameType?: 'ludo' | 'palanca_jet' | 'puzzle_angola';
   roomId: string;
   roomCode: string;
   roomName: string;
@@ -305,6 +400,7 @@ export interface AdminOverview {
   totalDepositsUsdt: number;
   totalCommissionKz: number;
   totalCommissionUsdt: number;
+  jetStats: PalancaJetAdminStats;
   players: AdminPlayerSummary[];
   transactions: Transaction[];
   supportTickets: SupportTicket[];

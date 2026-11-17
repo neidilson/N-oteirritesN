@@ -12,6 +12,12 @@ import type {
   MatchHistoryEntry,
   MatchHistoryPlayer,
   NotificationType,
+  PalancaJetAdminStats,
+  PalancaJetBet,
+  PalancaJetBetStatus,
+  PalancaJetBiggestWin,
+  PalancaJetHistoryRound,
+  PalancaJetPhase,
   PaymentMethod,
   PaymentSettings,
   PlatformConfig,
@@ -26,6 +32,11 @@ import type {
   Transaction,
   User
 } from '../types/index.ts';
+import {
+  DEFAULT_JET_CONFIG,
+  maskPlayerName,
+  sanitizeJetConfig
+} from '../utils/palancaJetEngine.ts';
 
 export const DEFAULT_PAYMENT_SETTINGS: PaymentSettings = {
   mcxEntity: '99412',
@@ -50,7 +61,9 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     future: { priceKz: 20000, priceUsdt: 22 },
     gang: { priceKz: 18000, priceUsdt: 20 },
     egyptian: { priceKz: 22000, priceUsdt: 24 }
-  }
+  },
+  minWithdrawKz: 500,
+  jetConfig: DEFAULT_JET_CONFIG
 };
 
 const DEFAULT_AVATAR =
@@ -103,7 +116,16 @@ export function sanitizePlatformConfig(
     }
   }
 
-  return { winnerPercent, commissionPercent, themePrices };
+  const legacyPuzzleMin = (raw as { puzzleConfig?: { minWithdrawKz?: number } } | null | undefined)
+    ?.puzzleConfig?.minWithdrawKz;
+  const rawMinWithdraw = Number(raw?.minWithdrawKz ?? legacyPuzzleMin ?? base.minWithdrawKz);
+  const minWithdrawKz = Number.isFinite(rawMinWithdraw)
+    ? Math.min(100_000, Math.max(100, Math.round(rawMinWithdraw)))
+    : base.minWithdrawKz;
+
+  const jetConfig = sanitizeJetConfig(raw?.jetConfig);
+
+  return { winnerPercent, commissionPercent, themePrices, minWithdrawKz, jetConfig };
 }
 
 export function normalizePhone(rawPhone: string): string {
@@ -215,6 +237,38 @@ interface StoredUser extends User {
   passwordHash: string;
 }
 
+interface StoredJetRound {
+  id: string;
+  roundNumber: number;
+  status: PalancaJetPhase | 'REFUNDED';
+  seedHash: string;
+  serverSeed: string;
+  crashPoint: number;
+  houseEdgePercent: number;
+  bettingEndsAtMs: number;
+  flightStartedAtMs: number;
+  createdAtIso: string;
+  crashedAtIso?: string;
+}
+
+interface StoredJetBet {
+  id: string;
+  roundId: string;
+  roundNumber: number;
+  userId: string;
+  userName: string;
+  maskedName: string;
+  slot: 0 | 1;
+  isDemo: boolean;
+  amount: number;
+  autoCashoutMultiplier: number | null;
+  cashoutMultiplier: number | null;
+  payout: number;
+  status: PalancaJetBetStatus;
+  createdAtIso: string;
+  createdAtDisplay: string;
+}
+
 // =========================================================
 // Repository Implementation (PostgreSQL via DATABASE_URL + Memory Dev Fallback)
 // =========================================================
@@ -228,6 +282,8 @@ class DatabaseRepository {
   private memPhoneIndex = new Map<string, string>();
   private memTransactions: Transaction[] = [];
   private memMatches: MatchHistoryEntry[] = [];
+  private memJetRounds: StoredJetRound[] = [];
+  private memJetBets = new Map<string, StoredJetBet>();
   private memTickets: SupportTicket[] = [];
   private memNotifications: AppNotification[] = [];
   private memPushSubscriptions: PushSubscriptionRecord[] = [];
@@ -293,6 +349,9 @@ class DatabaseRepository {
         demoUsdtBalance: 50,
         kzReserved: 0,
         usdtReserved: 0,
+        dailyEntryLimitKz: null,
+        dailyLossLimitKz: null,
+        selfExcludedUntil: null,
         matchesPlayed: 0,
         wins: 0,
         losses: 0,
@@ -435,6 +494,50 @@ class DatabaseRepository {
       );
 
       CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
+
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_kz_balance NUMERIC(18, 2) NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_entry_limit_kz NUMERIC(18, 2);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_loss_limit_kz NUMERIC(18, 2);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMPTZ;
+      ALTER TABLE match_history ADD COLUMN IF NOT EXISTS game_type TEXT NOT NULL DEFAULT 'ludo';
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS used_bonus_kz NUMERIC(18, 2) NOT NULL DEFAULT 0;
+
+      CREATE TABLE IF NOT EXISTS palanca_jet_rounds (
+        id TEXT PRIMARY KEY,
+        round_number INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        seed_hash TEXT NOT NULL,
+        server_seed TEXT NOT NULL,
+        crash_point NUMERIC(10, 2) NOT NULL,
+        house_edge_percent NUMERIC(5, 2) NOT NULL DEFAULT 5.00,
+        betting_ends_at_ms BIGINT NOT NULL DEFAULT 0,
+        flight_started_at_ms BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        crashed_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_jet_rounds_num ON palanca_jet_rounds(round_number DESC);
+      CREATE INDEX IF NOT EXISTS idx_jet_rounds_status ON palanca_jet_rounds(status);
+
+      CREATE TABLE IF NOT EXISTS palanca_jet_bets (
+        id TEXT PRIMARY KEY,
+        round_id TEXT NOT NULL REFERENCES palanca_jet_rounds(id) ON DELETE CASCADE,
+        round_number INTEGER NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_name TEXT NOT NULL,
+        masked_name TEXT NOT NULL,
+        slot SMALLINT NOT NULL DEFAULT 0,
+        is_demo BOOLEAN NOT NULL DEFAULT false,
+        amount NUMERIC(18, 2) NOT NULL,
+        auto_cashout_multiplier NUMERIC(10, 2),
+        cashout_multiplier NUMERIC(10, 2),
+        payout NUMERIC(18, 2) NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_jet_bets_round ON palanca_jet_bets(round_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_jet_bets_user_created ON palanca_jet_bets(user_id, created_at DESC);
     `);
   }
 
@@ -490,6 +593,17 @@ class DatabaseRepository {
       demoUsdtBalance: Number(row.demo_usdt_balance ?? 50),
       kzReserved: Number(row.kz_reserved ?? 0),
       usdtReserved: Number(row.usdt_reserved ?? 0),
+      dailyEntryLimitKz:
+        row.daily_entry_limit_kz !== null && row.daily_entry_limit_kz !== undefined
+          ? Number(row.daily_entry_limit_kz)
+          : null,
+      dailyLossLimitKz:
+        row.daily_loss_limit_kz !== null && row.daily_loss_limit_kz !== undefined
+          ? Number(row.daily_loss_limit_kz)
+          : null,
+      selfExcludedUntil: row.self_excluded_until
+        ? new Date(row.self_excluded_until as string | Date).toISOString()
+        : null,
       matchesPlayed: Number(row.matches_played ?? 0),
       wins: Number(row.wins ?? 0),
       losses: Number(row.losses ?? 0),
@@ -545,6 +659,12 @@ class DatabaseRepository {
   private mapMatchRow(row: Record<string, unknown>): MatchHistoryEntry {
     return {
       id: String(row.id),
+      gameType:
+        row.game_type === 'palanca_jet'
+          ? 'palanca_jet'
+          : row.game_type === 'puzzle_angola'
+          ? 'puzzle_angola'
+          : 'ludo',
       roomId: String(row.room_id),
       roomCode: String(row.room_code),
       roomName: String(row.room_name),
@@ -603,6 +723,11 @@ class DatabaseRepository {
       themePrices: {
         ...current.themePrices,
         ...(incoming.themePrices || {})
+      },
+      minWithdrawKz: incoming.minWithdrawKz ?? current.minWithdrawKz,
+      jetConfig: {
+        ...current.jetConfig,
+        ...(incoming.jetConfig || {})
       }
     });
 
@@ -673,11 +798,13 @@ class DatabaseRepository {
 
     const userId = `usr_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
     const passHash = hashPassword(cleanPassword);
+    const nowStr = formatDatePtAo(new Date());
 
     if (!this.pool) {
       if (this.memPhoneIndex.has(normPhone)) {
         return { ok: false, error: 'Este número de telemóvel já está cadastrado. Faça login.' };
       }
+
       const user: StoredUser = {
         id: userId,
         name: cleanName,
@@ -693,6 +820,9 @@ class DatabaseRepository {
         demoUsdtBalance: 50,
         kzReserved: 0,
         usdtReserved: 0,
+        dailyEntryLimitKz: null,
+        dailyLossLimitKz: null,
+        selfExcludedUntil: null,
         matchesPlayed: 0,
         wins: 0,
         losses: 0,
@@ -705,40 +835,51 @@ class DatabaseRepository {
         isIdentityVerified: true,
         isAgeVerified: true,
         isSuspended: false,
-        createdAt: formatDatePtAo(new Date())
+        createdAt: nowStr
       };
       this.memUsers.set(userId, user);
       this.memPhoneIndex.set(normPhone, userId);
-      return { ok: true, user: this.sanitizeUser(user), token: createSessionToken(userId, false) };
+
+      return {
+        ok: true,
+        user: this.sanitizeUser(user),
+        token: createSessionToken(userId, false)
+      };
     }
 
-    const existing = await this.pool.query(
-      `SELECT id FROM users WHERE phone_normalized = $1 LIMIT 1`,
-      [normPhone]
-    );
-    if (existing.rows.length > 0) {
-      return { ok: false, error: 'Este número de telemóvel já está cadastrado. Faça login.' };
-    }
+    return this.withPgTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id FROM users WHERE phone_normalized = $1 LIMIT 1`,
+        [normPhone]
+      );
+      if (existing.rows.length > 0) {
+        return { ok: false, error: 'Este número de telemóvel já está cadastrado. Faça login.' };
+      }
 
-    const res = await this.pool.query(
-      `INSERT INTO users (
-        id, name, phone, phone_normalized, email, password_hash, avatar, role, category,
-        kz_balance, usdt_balance, demo_kz_balance, demo_usdt_balance
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'player', 'Bronze', 0, 0, 50000, 50)
-      RETURNING *`,
-      [
-        userId,
-        cleanName,
-        displayPhone,
-        normPhone,
-        cleanEmail || `${cleanName.toLowerCase().replace(/\s+/g, '')}@jogador.ao`,
-        passHash,
-        DEFAULT_AVATAR
-      ]
-    );
+      const res = await client.query(
+        `INSERT INTO users (
+          id, name, phone, phone_normalized, email, password_hash, avatar, role, category,
+          kz_balance, usdt_balance, demo_kz_balance, demo_usdt_balance
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'player', 'Bronze', 0, 0, 50000, 50)
+        RETURNING *`,
+        [
+          userId,
+          cleanName,
+          displayPhone,
+          normPhone,
+          cleanEmail || `${cleanName.toLowerCase().replace(/\s+/g, '')}@jogador.ao`,
+          passHash,
+          DEFAULT_AVATAR
+        ]
+      );
 
-    const user = this.mapUserRow(res.rows[0]);
-    return { ok: true, user, token: createSessionToken(user.id, false) };
+      const user = this.mapUserRow(res.rows[0]);
+      return {
+        ok: true,
+        user,
+        token: createSessionToken(user.id, false)
+      };
+    });
   }
 
   async loginUser(params: {
@@ -958,12 +1099,14 @@ class DatabaseRepository {
     destination: string;
     network?: string;
   }): Promise<{ ok: true; user: User; transaction: Transaction } | { ok: false; error: string }> {
+    const cfg = await this.getPlatformConfig();
+    const minKz = Math.max(100, Math.round(cfg.minWithdrawKz ?? 500));
     const amount = Number(params.amount);
-    const minAmount = params.currency === 'KZ' ? 500 : 5;
+    const minAmount = params.currency === 'KZ' ? minKz : 5;
     if (!Number.isFinite(amount) || amount < minAmount) {
       return {
         ok: false,
-        error: `Valor mínimo de levantamento: ${minAmount} ${params.currency}.`
+        error: `Valor mínimo de levantamento: ${minAmount.toLocaleString('pt-AO')} ${params.currency}.`
       };
     }
     if (!params.destination.trim()) {
@@ -980,7 +1123,10 @@ class DatabaseRepository {
       if (!u) return { ok: false, error: 'Utilizador não encontrado.' };
       if (params.currency === 'KZ') {
         if (u.kzBalance < amount) {
-          return { ok: false, error: 'Saldo em Kz insuficiente para realizar este levantamento.' };
+          return {
+            ok: false,
+            error: 'Saldo Real em Kz insuficiente para realizar este levantamento.'
+          };
         }
         u.kzBalance = Number((u.kzBalance - amount).toFixed(2));
         u.kzReserved = Number((u.kzReserved + amount).toFixed(2));
@@ -1140,46 +1286,45 @@ class DatabaseRepository {
       if (!row) return { ok: false, error: 'Sessão de jogador inválida. Faça login novamente.' };
       if (row.is_suspended) return { ok: false, error: 'Conta suspensa.' };
 
-      const col = params.isDemo
-        ? params.currency === 'KZ'
-          ? 'demo_kz_balance'
-          : 'demo_usdt_balance'
-        : params.currency === 'KZ'
-        ? 'kz_balance'
-        : 'usdt_balance';
-
-      const currentBal = Number(row[col] ?? 0);
-      if (currentBal < amount) {
-        return {
-          ok: false,
-          error: params.isDemo
-            ? `Saldo Demo ${params.currency} insuficiente para esta aposta.`
-            : `Saldo Real ${params.currency} insuficiente para esta aposta. Deposite na carteira ou use o Modo DEMO.`
-        };
+      if (params.isDemo) {
+        const col = params.currency === 'KZ' ? 'demo_kz_balance' : 'demo_usdt_balance';
+        if (Number(row[col] ?? 0) < amount) {
+          return { ok: false, error: `Saldo Demo ${params.currency} insuficiente para esta aposta.` };
+        }
+        const updated = await client.query(
+          `UPDATE users SET ${col} = ${col} - $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+          [params.userId, amount]
+        );
+        return { ok: true, user: this.mapUserRow(updated.rows[0]) };
       }
 
+      const balCol = params.currency === 'KZ' ? 'kz_balance' : 'usdt_balance';
+      if (Number(row[balCol] ?? 0) < amount) {
+        return {
+          ok: false,
+          error: `Saldo Real ${params.currency} insuficiente para esta aposta. Deposite na carteira ou use o Modo DEMO.`
+        };
+      }
       const updated = await client.query(
-        `UPDATE users SET ${col} = ${col} - $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        `UPDATE users SET ${balCol} = ${balCol} - $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
         [params.userId, amount]
       );
 
-      if (!params.isDemo) {
-        await client.query(
-          `INSERT INTO transactions (
-            id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes, room_id
-          ) VALUES ($1, $2, $3, 'BET_ENTRY', $4, $5, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $6, $7, $8)`,
-          [
-            `tx_bet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
-            params.userId,
-            String(row.name),
-            params.currency,
-            amount,
-            `BET-${params.roomCode}`,
-            `Entrada na mesa ${params.roomCode}`,
-            params.roomId
-          ]
-        );
-      }
+      await client.query(
+        `INSERT INTO transactions (
+          id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes, room_id
+        ) VALUES ($1, $2, $3, 'BET_ENTRY', $4, $5, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $6, $7, $8)`,
+        [
+          `tx_bet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          params.userId,
+          String(row.name),
+          params.currency,
+          amount,
+          `BET-${params.roomCode}`,
+          `Entrada na mesa ${params.roomCode}`,
+          params.roomId
+        ]
+      );
 
       return { ok: true, user: this.mapUserRow(updated.rows[0]) };
     });
@@ -1224,37 +1369,37 @@ class DatabaseRepository {
     }
 
     return this.withPgTransaction(async (client) => {
-      const col = params.isDemo
-        ? params.currency === 'KZ'
-          ? 'demo_kz_balance'
-          : 'demo_usdt_balance'
-        : params.currency === 'KZ'
-        ? 'kz_balance'
-        : 'usdt_balance';
+      if (params.isDemo) {
+        const col = params.currency === 'KZ' ? 'demo_kz_balance' : 'demo_usdt_balance';
+        const res = await client.query(
+          `UPDATE users SET ${col} = ${col} + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+          [params.userId, amount]
+        );
+        return res.rows[0] ? this.mapUserRow(res.rows[0]) : null;
+      }
 
+      const balCol = params.currency === 'KZ' ? 'kz_balance' : 'usdt_balance';
       const res = await client.query(
-        `UPDATE users SET ${col} = ${col} + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        `UPDATE users SET ${balCol} = ${balCol} + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
         [params.userId, amount]
       );
       if (!res.rows[0]) return null;
 
-      if (!params.isDemo) {
-        await client.query(
-          `INSERT INTO transactions (
-            id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes, room_id
-          ) VALUES ($1, $2, $3, 'DEPOSIT', $4, $5, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $6, $7, $8)`,
-          [
-            `tx_ref_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
-            params.userId,
-            String(res.rows[0].name),
-            params.currency,
-            amount,
-            `REFUND-${params.roomCode}`,
-            `Reembolso de aposta (saída antes do início na mesa ${params.roomCode})`,
-            params.roomId
-          ]
-        );
-      }
+      await client.query(
+        `INSERT INTO transactions (
+          id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes, room_id
+        ) VALUES ($1, $2, $3, 'DEPOSIT', $4, $5, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $6, $7, $8)`,
+        [
+          `tx_ref_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          params.userId,
+          String(res.rows[0].name),
+          params.currency,
+          amount,
+          `REFUND-${params.roomCode}`,
+          `Reembolso de aposta (saída antes do início na mesa ${params.roomCode})`,
+          params.roomId
+        ]
+      );
 
       return this.mapUserRow(res.rows[0]);
     });
@@ -2298,11 +2443,70 @@ class DatabaseRepository {
         .filter((t) => t.type === 'DEPOSIT' && t.currency === 'USDT' && t.status === 'Confirmado')
         .reduce((acc, t) => acc + t.amount, 0);
       const totalCommissionKz = this.memTransactions
-        .filter((t) => (t.type === 'COMMISSION' || t.type === 'THEME_UNLOCK') && t.currency === 'KZ' && (t.status === 'Pago' || t.status === 'Confirmado'))
+        .filter(
+          (t) =>
+            (t.type === 'COMMISSION' || t.type === 'THEME_UNLOCK') &&
+            t.currency === 'KZ' &&
+            (t.status === 'Pago' || t.status === 'Confirmado')
+        )
         .reduce((acc, t) => acc + t.amount, 0);
       const totalCommissionUsdt = this.memTransactions
-        .filter((t) => (t.type === 'COMMISSION' || t.type === 'THEME_UNLOCK') && t.currency === 'USDT' && (t.status === 'Pago' || t.status === 'Confirmado'))
+        .filter(
+          (t) =>
+            (t.type === 'COMMISSION' || t.type === 'THEME_UNLOCK') &&
+            t.currency === 'USDT' &&
+            (t.status === 'Pago' || t.status === 'Confirmado')
+        )
         .reduce((acc, t) => acc + t.amount, 0);
+
+      const settledRealJetBets = Array.from(this.memJetBets.values()).filter(
+        (b) => !b.isDemo && (b.status === 'CASHED_OUT' || b.status === 'LOST')
+      );
+      const totalRealWageredKz = Number(
+        settledRealJetBets.reduce((acc, b) => acc + b.amount, 0).toFixed(2)
+      );
+      const totalRealPayoutKz = Number(
+        settledRealJetBets
+          .filter((b) => b.status === 'CASHED_OUT')
+          .reduce((acc, b) => acc + b.payout, 0)
+          .toFixed(2)
+      );
+      const houseProfitKz = Number((totalRealWageredKz - totalRealPayoutKz).toFixed(2));
+      const rtpPercent =
+        totalRealWageredKz > 0
+          ? Number(((totalRealPayoutKz / totalRealWageredKz) * 100).toFixed(2))
+          : 0;
+
+      const todayKey = this.getAngolaDayKey(new Date());
+      const crashedRounds = this.memJetRounds.filter((r) => r.status === 'CRASHED');
+      const roundsToday = crashedRounds.filter(
+        (r) => this.getAngolaDayKey(new Date(r.createdAtIso)) === todayKey
+      ).length;
+
+      const biggestWins: PalancaJetBiggestWin[] = settledRealJetBets
+        .filter((b) => b.status === 'CASHED_OUT' && b.payout > 0)
+        .sort((a, b) => b.payout - a.payout)
+        .slice(0, 10)
+        .map((b) => ({
+          id: b.id,
+          roundNumber: b.roundNumber,
+          maskedName: b.maskedName,
+          amount: b.amount,
+          cashoutMultiplier: b.cashoutMultiplier || 1,
+          payout: b.payout,
+          createdAt: b.createdAtDisplay
+        }));
+
+      const jetStats: PalancaJetAdminStats = {
+        totalRealBets: settledRealJetBets.length,
+        totalRealWageredKz,
+        totalRealPayoutKz,
+        houseProfitKz,
+        rtpPercent,
+        roundsToday,
+        totalRounds: crashedRounds.length,
+        biggestWins
+      };
 
       return {
         storageMode: 'memory',
@@ -2312,6 +2516,7 @@ class DatabaseRepository {
         totalDepositsUsdt,
         totalCommissionKz,
         totalCommissionUsdt,
+        jetStats,
         players,
         transactions: this.memTransactions.slice(0, 200),
         supportTickets: this.memTickets.slice(0, 100),
@@ -2319,26 +2524,82 @@ class DatabaseRepository {
       };
     }
 
-    const [usersRes, txRes, matchRes, tickRes, aggRes] = await Promise.all([
-      this.pool.query(
-        `SELECT id, name, phone, email, category, kz_balance, usdt_balance, demo_kz_balance, matches_played, wins, losses, is_suspended, created_at
-         FROM users ORDER BY created_at DESC LIMIT 200`
-      ),
-      this.pool.query(`SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200`),
-      this.pool.query(`SELECT * FROM match_history ORDER BY finished_at DESC LIMIT 100`),
-      this.pool.query(`SELECT * FROM support_tickets ORDER BY updated_at DESC LIMIT 100`),
-      this.pool.query(`
-        SELECT
-          (SELECT COUNT(*)::int FROM users) AS total_users,
-          (SELECT COUNT(*)::int FROM match_history) AS total_matches,
-          COALESCE((SELECT SUM(amount) FROM transactions WHERE type = 'DEPOSIT' AND currency = 'KZ' AND status = 'Confirmado'), 0) AS total_dep_kz,
-          COALESCE((SELECT SUM(amount) FROM transactions WHERE type = 'DEPOSIT' AND currency = 'USDT' AND status = 'Confirmado'), 0) AS total_dep_usdt,
-          COALESCE((SELECT SUM(amount) FROM transactions WHERE type IN ('COMMISSION', 'THEME_UNLOCK') AND currency = 'KZ' AND status IN ('Pago', 'Confirmado')), 0) AS total_comm_kz,
-          COALESCE((SELECT SUM(amount) FROM transactions WHERE type IN ('COMMISSION', 'THEME_UNLOCK') AND currency = 'USDT' AND status IN ('Pago', 'Confirmado')), 0) AS total_comm_usdt
-      `)
-    ]);
+    const [usersRes, txRes, matchRes, tickRes, aggRes, jetAggRes, jetRoundsRes, biggestWinsRes] =
+      await Promise.all([
+        this.pool.query(
+          `SELECT id, name, phone, email, category, kz_balance, usdt_balance, demo_kz_balance, matches_played, wins, losses, is_suspended, created_at
+           FROM users ORDER BY created_at DESC LIMIT 200`
+        ),
+        this.pool.query(`SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200`),
+        this.pool.query(`SELECT * FROM match_history ORDER BY finished_at DESC LIMIT 100`),
+        this.pool.query(`SELECT * FROM support_tickets ORDER BY updated_at DESC LIMIT 100`),
+        this.pool.query(`
+          SELECT
+            (SELECT COUNT(*)::int FROM users) AS total_users,
+            (SELECT COUNT(*)::int FROM match_history) AS total_matches,
+            COALESCE((SELECT SUM(amount) FROM transactions WHERE type = 'DEPOSIT' AND currency = 'KZ' AND status = 'Confirmado'), 0) AS total_dep_kz,
+            COALESCE((SELECT SUM(amount) FROM transactions WHERE type = 'DEPOSIT' AND currency = 'USDT' AND status = 'Confirmado'), 0) AS total_dep_usdt,
+            COALESCE((SELECT SUM(amount) FROM transactions WHERE type IN ('COMMISSION', 'THEME_UNLOCK') AND currency = 'KZ' AND status IN ('Pago', 'Confirmado')), 0) AS total_comm_kz,
+            COALESCE((SELECT SUM(amount) FROM transactions WHERE type IN ('COMMISSION', 'THEME_UNLOCK') AND currency = 'USDT' AND status IN ('Pago', 'Confirmado')), 0) AS total_comm_usdt
+        `),
+        this.pool.query(`
+          SELECT
+            COUNT(*)::int AS total_real_bets,
+            COALESCE(SUM(amount), 0) AS total_wagered,
+            COALESCE(SUM(CASE WHEN status = 'CASHED_OUT' THEN payout ELSE 0 END), 0) AS total_payout
+          FROM palanca_jet_bets
+          WHERE is_demo = false AND status IN ('CASHED_OUT', 'LOST')
+        `),
+        this.pool.query(`
+          SELECT
+            COUNT(*)::int AS total_rounds,
+            COUNT(*) FILTER (
+              WHERE (created_at AT TIME ZONE 'Africa/Luanda')::date = (NOW() AT TIME ZONE 'Africa/Luanda')::date
+            )::int AS rounds_today
+          FROM palanca_jet_rounds
+          WHERE status = 'CRASHED'
+        `),
+        this.pool.query(`
+          SELECT id, round_number, masked_name, amount, cashout_multiplier, payout, created_at
+          FROM palanca_jet_bets
+          WHERE is_demo = false AND status = 'CASHED_OUT' AND payout > 0
+          ORDER BY payout DESC
+          LIMIT 10
+        `)
+      ]);
 
     const agg = aggRes.rows[0] || {};
+    const jAgg = jetAggRes.rows[0] || {};
+    const jRounds = jetRoundsRes.rows[0] || {};
+    const totalRealWageredKz = Number(Number(jAgg.total_wagered ?? 0).toFixed(2));
+    const totalRealPayoutKz = Number(Number(jAgg.total_payout ?? 0).toFixed(2));
+    const houseProfitKz = Number((totalRealWageredKz - totalRealPayoutKz).toFixed(2));
+    const rtpPercent =
+      totalRealWageredKz > 0
+        ? Number(((totalRealPayoutKz / totalRealWageredKz) * 100).toFixed(2))
+        : 0;
+
+    const biggestWins: PalancaJetBiggestWin[] = biggestWinsRes.rows.map((r) => ({
+      id: String(r.id),
+      roundNumber: Number(r.round_number ?? 0),
+      maskedName: String(r.masked_name || 'Jo***'),
+      amount: Number(r.amount ?? 0),
+      cashoutMultiplier: Number(r.cashout_multiplier ?? 1),
+      payout: Number(r.payout ?? 0),
+      createdAt: formatDatePtAo(r.created_at as string | Date)
+    }));
+
+    const jetStats: PalancaJetAdminStats = {
+      totalRealBets: Number(jAgg.total_real_bets ?? 0),
+      totalRealWageredKz,
+      totalRealPayoutKz,
+      houseProfitKz,
+      rtpPercent,
+      roundsToday: Number(jRounds.rounds_today ?? 0),
+      totalRounds: Number(jRounds.total_rounds ?? 0),
+      biggestWins
+    };
+
     const players: AdminPlayerSummary[] = usersRes.rows.map((r) => ({
       id: String(r.id),
       name: String(r.name),
@@ -2363,10 +2624,1146 @@ class DatabaseRepository {
       totalDepositsUsdt: Number(agg.total_dep_usdt ?? 0),
       totalCommissionKz: Number(agg.total_comm_kz ?? 0),
       totalCommissionUsdt: Number(agg.total_comm_usdt ?? 0),
+      jetStats,
       players,
       transactions: txRes.rows.map((r) => this.mapTransactionRow(r)),
       supportTickets: tickRes.rows.map((r) => this.mapTicketRow(r)),
       matchHistory: matchRes.rows.map((r) => this.mapMatchRow(r))
+    };
+  }
+
+  // ---------- Responsible Gaming & Palanca Jet (Server-Authoritative) ----------
+
+  async updateResponsibleGaming(params: {
+    userId: string;
+    dailyEntryLimitKz?: number | null;
+    dailyLossLimitKz?: number | null;
+    selfExclusionHours?: number | null;
+  }): Promise<{ ok: true; user: User } | { ok: false; error: string }> {
+    const cleanEntryLimit =
+      params.dailyEntryLimitKz === undefined
+        ? undefined
+        : params.dailyEntryLimitKz === null || Number(params.dailyEntryLimitKz) <= 0
+        ? null
+        : Math.round(Number(params.dailyEntryLimitKz));
+
+    if (
+      cleanEntryLimit !== undefined &&
+      cleanEntryLimit !== null &&
+      (!Number.isFinite(cleanEntryLimit) || cleanEntryLimit < 100 || cleanEntryLimit > 50_000_000)
+    ) {
+      return {
+        ok: false,
+        error: 'Limite diário de apostas deve ser entre 100 Kz e 50.000.000 Kz (ou desativado).'
+      };
+    }
+
+    const cleanLossLimit =
+      params.dailyLossLimitKz === undefined
+        ? undefined
+        : params.dailyLossLimitKz === null || Number(params.dailyLossLimitKz) <= 0
+        ? null
+        : Math.round(Number(params.dailyLossLimitKz));
+
+    if (
+      cleanLossLimit !== undefined &&
+      cleanLossLimit !== null &&
+      (!Number.isFinite(cleanLossLimit) || cleanLossLimit < 100 || cleanLossLimit > 50_000_000)
+    ) {
+      return {
+        ok: false,
+        error: 'Limite diário de perdas deve ser entre 100 Kz e 50.000.000 Kz (ou desativado).'
+      };
+    }
+
+    let nextExclusionIso: string | undefined;
+    if (params.selfExclusionHours !== undefined && params.selfExclusionHours !== null) {
+      const hours = Math.round(Number(params.selfExclusionHours));
+      if (!Number.isFinite(hours) || hours < 1 || hours > 24 * 90) {
+        return { ok: false, error: 'Período de pausa temporária inválido.' };
+      }
+      nextExclusionIso = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+    }
+
+    if (!this.pool) {
+      const u = this.memUsers.get(params.userId);
+      if (!u) return { ok: false, error: 'Utilizador não encontrado.' };
+      if (cleanEntryLimit !== undefined) u.dailyEntryLimitKz = cleanEntryLimit;
+      if (cleanLossLimit !== undefined) u.dailyLossLimitKz = cleanLossLimit;
+      if (nextExclusionIso !== undefined) u.selfExcludedUntil = nextExclusionIso;
+      return { ok: true, user: this.sanitizeUser(u) };
+    }
+
+    const curRes = await this.pool.query(`SELECT * FROM users WHERE id = $1 LIMIT 1`, [params.userId]);
+    if (!curRes.rows[0]) return { ok: false, error: 'Utilizador não encontrado.' };
+    const cur = this.mapUserRow(curRes.rows[0]);
+
+    const finalEntryLimit = cleanEntryLimit !== undefined ? cleanEntryLimit : cur.dailyEntryLimitKz ?? null;
+    const finalLossLimit = cleanLossLimit !== undefined ? cleanLossLimit : cur.dailyLossLimitKz ?? null;
+    const finalExclusion = nextExclusionIso !== undefined ? nextExclusionIso : cur.selfExcludedUntil ?? null;
+
+    const res = await this.pool.query(
+      `UPDATE users
+       SET daily_entry_limit_kz = $2,
+           daily_loss_limit_kz = $3,
+           self_excluded_until = $4::timestamptz,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [params.userId, finalEntryLimit, finalLossLimit, finalExclusion]
+    );
+    if (!res.rows[0]) return { ok: false, error: 'Utilizador não encontrado.' };
+    return { ok: true, user: this.mapUserRow(res.rows[0]) };
+  }
+
+  private getAngolaDayKey(d: Date): string {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Luanda' }).format(d);
+    } catch {
+      return d.toISOString().slice(0, 10);
+    }
+  }
+
+  private mapJetBetRow(r: Record<string, unknown>): PalancaJetBet {
+    return {
+      id: String(r.id),
+      roundId: String(r.round_id),
+      userId: String(r.user_id),
+      maskedName: String(r.masked_name || 'Jo***'),
+      slot: Number(r.slot) === 1 ? 1 : 0,
+      isDemo: Boolean(r.is_demo),
+      amount: Number(r.amount ?? 0),
+      autoCashoutMultiplier:
+        r.auto_cashout_multiplier !== null && r.auto_cashout_multiplier !== undefined
+          ? Number(r.auto_cashout_multiplier)
+          : null,
+      cashoutMultiplier:
+        r.cashout_multiplier !== null && r.cashout_multiplier !== undefined
+          ? Number(r.cashout_multiplier)
+          : null,
+      payout: Number(r.payout ?? 0),
+      status: r.status as PalancaJetBetStatus,
+      createdAt: formatDatePtAo(r.created_at as string | Date)
+    };
+  }
+
+  private toPublicJetBet(b: StoredJetBet): PalancaJetBet {
+    return {
+      id: b.id,
+      roundId: b.roundId,
+      userId: b.userId,
+      maskedName: b.maskedName,
+      slot: b.slot,
+      isDemo: b.isDemo,
+      amount: b.amount,
+      autoCashoutMultiplier: b.autoCashoutMultiplier,
+      cashoutMultiplier: b.cashoutMultiplier,
+      payout: b.payout,
+      status: b.status,
+      createdAt: b.createdAtDisplay
+    };
+  }
+
+  private getJetDailyStatsMem(userId: string): { wageredToday: number; netLossToday: number } {
+    const todayKey = this.getAngolaDayKey(new Date());
+    let wageredToday = 0;
+    let payoutToday = 0;
+    for (const b of this.memJetBets.values()) {
+      if (
+        b.userId === userId &&
+        !b.isDemo &&
+        b.status !== 'CANCELLED' &&
+        b.status !== 'REFUNDED' &&
+        this.getAngolaDayKey(new Date(b.createdAtIso)) === todayKey
+      ) {
+        wageredToday += b.amount;
+        if (b.status === 'CASHED_OUT') payoutToday += b.payout;
+      }
+    }
+    return {
+      wageredToday: Number(wageredToday.toFixed(2)),
+      netLossToday: Number(Math.max(0, wageredToday - payoutToday).toFixed(2))
+    };
+  }
+
+  async recoverInterruptedJetRounds(): Promise<number> {
+    if (!this.pool) {
+      let refunded = 0;
+      for (const r of this.memJetRounds) {
+        if (r.status === 'BETTING' || r.status === 'FLYING') {
+          r.status = 'REFUNDED';
+        }
+      }
+      for (const b of this.memJetBets.values()) {
+        if (b.status === 'PLACED') {
+          b.status = 'REFUNDED';
+          const u = this.memUsers.get(b.userId);
+          if (u) {
+            if (b.isDemo) {
+              u.demoKzBalance = Number(((u.demoKzBalance ?? 0) + b.amount).toFixed(2));
+            } else {
+              u.kzBalance = Number((u.kzBalance + b.amount).toFixed(2));
+              this.memTransactions.unshift({
+                id: `tx_jref_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+                userId: u.id,
+                userName: u.name,
+                type: 'JET_REFUND',
+                currency: 'KZ',
+                amount: b.amount,
+                fee: 0,
+                status: 'Confirmado',
+                method: 'MULTICAIXA_EXPRESS',
+                reference: `JET-${b.roundNumber}`,
+                notes: `Reembolso automático Palanca Jet (ronda #${b.roundNumber} interrompida no servidor)`,
+                createdAt: formatDatePtAo(new Date())
+              });
+            }
+          }
+          refunded += 1;
+        }
+      }
+      return refunded;
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const roundsRes = await client.query(
+        `SELECT id FROM palanca_jet_rounds WHERE status IN ('BETTING', 'FLYING') FOR UPDATE`
+      );
+      if (roundsRes.rows.length === 0) return 0;
+
+      const betsRes = await client.query(
+        `SELECT * FROM palanca_jet_bets WHERE status = 'PLACED' FOR UPDATE`
+      );
+      let refundedCount = 0;
+
+      for (const row of betsRes.rows) {
+        const amount = Number(row.amount ?? 0);
+        const userId = String(row.user_id);
+        const roundNumber = Number(row.round_number ?? 0);
+        const isDemo = Boolean(row.is_demo);
+
+        if (isDemo) {
+          await client.query(
+            `UPDATE users SET demo_kz_balance = demo_kz_balance + $2, updated_at = NOW() WHERE id = $1`,
+            [userId, amount]
+          );
+        } else {
+          await client.query(
+            `UPDATE users SET kz_balance = kz_balance + $2, updated_at = NOW() WHERE id = $1`,
+            [userId, amount]
+          );
+          await client.query(
+            `INSERT INTO transactions (
+              id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes
+            ) VALUES ($1, $2, $3, 'JET_REFUND', 'KZ', $4, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $5, $6)`,
+            [
+              `tx_jref_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+              userId,
+              String(row.user_name || 'Jogador'),
+              amount,
+              `JET-${roundNumber}`,
+              `Reembolso automático Palanca Jet (ronda #${roundNumber} interrompida no servidor)`
+            ]
+          );
+        }
+
+        await client.query(`UPDATE palanca_jet_bets SET status = 'REFUNDED' WHERE id = $1`, [row.id]);
+        refundedCount += 1;
+      }
+
+      await client.query(
+        `UPDATE palanca_jet_rounds SET status = 'REFUNDED' WHERE status IN ('BETTING', 'FLYING')`
+      );
+      return refundedCount;
+    });
+  }
+
+  async getLatestJetRoundNumber(): Promise<number> {
+    if (!this.pool) {
+      return this.memJetRounds.reduce((max, r) => Math.max(max, r.roundNumber), 0);
+    }
+    const res = await this.pool.query(
+      `SELECT COALESCE(MAX(round_number), 0)::int AS max_num FROM palanca_jet_rounds`
+    );
+    return Number(res.rows[0]?.max_num ?? 0);
+  }
+
+  async createJetRound(params: {
+    id: string;
+    roundNumber: number;
+    seedHash: string;
+    serverSeed: string;
+    crashPoint: number;
+    houseEdgePercent: number;
+    bettingEndsAtMs: number;
+  }): Promise<void> {
+    if (!this.pool) {
+      this.memJetRounds.unshift({
+        id: params.id,
+        roundNumber: params.roundNumber,
+        status: 'BETTING',
+        seedHash: params.seedHash,
+        serverSeed: params.serverSeed,
+        crashPoint: params.crashPoint,
+        houseEdgePercent: params.houseEdgePercent,
+        bettingEndsAtMs: params.bettingEndsAtMs,
+        flightStartedAtMs: 0,
+        createdAtIso: new Date().toISOString()
+      });
+      if (this.memJetRounds.length > 150) {
+        this.memJetRounds = this.memJetRounds.slice(0, 150);
+      }
+      return;
+    }
+
+    await this.pool.query(
+      `INSERT INTO palanca_jet_rounds (
+        id, round_number, status, seed_hash, server_seed, crash_point, house_edge_percent, betting_ends_at_ms
+      ) VALUES ($1, $2, 'BETTING', $3, $4, $5, $6, $7)`,
+      [
+        params.id,
+        params.roundNumber,
+        params.seedHash,
+        params.serverSeed,
+        params.crashPoint,
+        params.houseEdgePercent,
+        params.bettingEndsAtMs
+      ]
+    );
+  }
+
+  async markJetRoundFlying(roundId: string, flightStartedAtMs: number): Promise<void> {
+    if (!this.pool) {
+      const r = this.memJetRounds.find((x) => x.id === roundId);
+      if (r) {
+        r.status = 'FLYING';
+        r.flightStartedAtMs = flightStartedAtMs;
+      }
+      return;
+    }
+    await this.pool.query(
+      `UPDATE palanca_jet_rounds SET status = 'FLYING', flight_started_at_ms = $2 WHERE id = $1`,
+      [roundId, flightStartedAtMs]
+    );
+  }
+
+  async placeJetBet(params: {
+    roundId: string;
+    roundNumber: number;
+    userId: string;
+    slot: 0 | 1;
+    amount: number;
+    isDemo: boolean;
+    autoCashoutMultiplier: number | null;
+  }): Promise<
+    | { ok: true; bet: PalancaJetBet; user: User }
+    | { ok: false; error: string }
+  > {
+    const cfg = await this.getPlatformConfig();
+    const jCfg = cfg.jetConfig;
+    if (!jCfg.enabled) {
+      return { ok: false, error: 'O Palanca Jet está temporariamente pausado pelo administrador.' };
+    }
+    if (!params.isDemo && !jCfg.realMoneyEnabled) {
+      return {
+        ok: false,
+        error: 'As apostas a dinheiro real no Palanca Jet estão pausadas pelo administrador. Use o Modo DEMO.'
+      };
+    }
+
+    const amount = Math.round(Number(params.amount));
+    if (!Number.isFinite(amount) || amount < jCfg.minBetKz || amount > jCfg.maxBetKz) {
+      return {
+        ok: false,
+        error: `Aposta permitida entre ${jCfg.minBetKz.toLocaleString('pt-AO')} Kz e ${jCfg.maxBetKz.toLocaleString('pt-AO')} Kz.`
+      };
+    }
+
+    let autoMult: number | null = null;
+    if (params.autoCashoutMultiplier !== null && params.autoCashoutMultiplier !== undefined) {
+      const parsed = Math.floor(Number(params.autoCashoutMultiplier) * 100) / 100;
+      if (!Number.isFinite(parsed) || parsed < 1.05 || parsed > 1000) {
+        return { ok: false, error: 'Levantamento automático deve ser entre 1.05x e 1000x.' };
+      }
+      autoMult = parsed;
+    }
+
+    const slot: 0 | 1 = params.slot === 1 ? 1 : 0;
+    const betId = `jbet_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const nowDisplay = formatDatePtAo(new Date());
+
+    if (!this.pool) {
+      const round = this.memJetRounds.find((r) => r.id === params.roundId);
+      if (!round || round.status !== 'BETTING') {
+        return { ok: false, error: 'As apostas para esta ronda já fecharam.' };
+      }
+
+      const u = this.memUsers.get(params.userId);
+      if (!u) return { ok: false, error: 'Sessão inválida. Inicie sessão novamente.' };
+      if (u.isSuspended) return { ok: false, error: 'Conta suspensa.' };
+
+      if (!params.isDemo && u.selfExcludedUntil && new Date(u.selfExcludedUntil).getTime() > Date.now()) {
+        return {
+          ok: false,
+          error: `Autoexclusão ativa até ${formatDatePtAo(u.selfExcludedUntil)}. Apenas o Modo DEMO está disponível.`
+        };
+      }
+
+      for (const b of this.memJetBets.values()) {
+        if (
+          b.roundId === params.roundId &&
+          b.userId === params.userId &&
+          b.slot === slot &&
+          b.status === 'PLACED'
+        ) {
+          return { ok: false, error: `Já tem uma aposta ativa no Painel ${slot + 1} desta ronda.` };
+        }
+      }
+
+      if (params.isDemo) {
+        if ((u.demoKzBalance ?? 0) < amount) {
+          return { ok: false, error: 'Saldo Demo KZ insuficiente para esta aposta.' };
+        }
+        u.demoKzBalance = Number(((u.demoKzBalance ?? 0) - amount).toFixed(2));
+      } else {
+        const statsToday = this.getJetDailyStatsMem(params.userId);
+        if (u.dailyEntryLimitKz && statsToday.wageredToday + amount > u.dailyEntryLimitKz) {
+          return {
+            ok: false,
+            error: `Limite diário de apostas (${u.dailyEntryLimitKz.toLocaleString('pt-AO')} Kz) atingido. Apostado hoje: ${statsToday.wageredToday.toLocaleString('pt-AO')} Kz.`
+          };
+        }
+        if (u.dailyLossLimitKz && statsToday.netLossToday >= u.dailyLossLimitKz) {
+          return {
+            ok: false,
+            error: `Limite diário de perdas (${u.dailyLossLimitKz.toLocaleString('pt-AO')} Kz) atingido. Faça uma pausa ou jogue no Modo DEMO.`
+          };
+        }
+        if (u.kzBalance < amount) {
+          return {
+            ok: false,
+            error: 'Saldo Real KZ insuficiente. Deposite na carteira ou use o Modo DEMO.'
+          };
+        }
+        u.kzBalance = Number((u.kzBalance - amount).toFixed(2));
+
+        this.memTransactions.unshift({
+          id: `tx_jbet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          userId: u.id,
+          userName: u.name,
+          type: 'JET_BET',
+          currency: 'KZ',
+          amount,
+          fee: 0,
+          status: 'Confirmado',
+          method: 'MULTICAIXA_EXPRESS',
+          reference: `JET-${params.roundNumber}-P${slot + 1}`,
+          notes: `Aposta Palanca Jet (Ronda #${params.roundNumber} · Painel ${slot + 1})`,
+          createdAt: nowDisplay
+        });
+      }
+
+      const stored: StoredJetBet = {
+        id: betId,
+        roundId: params.roundId,
+        roundNumber: params.roundNumber,
+        userId: u.id,
+        userName: u.name,
+        maskedName: maskPlayerName(u.name),
+        slot,
+        isDemo: params.isDemo,
+        amount,
+        autoCashoutMultiplier: autoMult,
+        cashoutMultiplier: null,
+        payout: 0,
+        status: 'PLACED',
+        createdAtIso: new Date().toISOString(),
+        createdAtDisplay: nowDisplay
+      };
+      this.memJetBets.set(betId, stored);
+
+      return { ok: true, bet: this.toPublicJetBet(stored), user: this.sanitizeUser(u) };
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const roundRes = await client.query(
+        `SELECT status FROM palanca_jet_rounds WHERE id = $1 FOR UPDATE`,
+        [params.roundId]
+      );
+      if (!roundRes.rows[0] || roundRes.rows[0].status !== 'BETTING') {
+        return { ok: false, error: 'As apostas para esta ronda já fecharam.' };
+      }
+
+      const uRes = await client.query(`SELECT * FROM users WHERE id = $1 FOR UPDATE`, [params.userId]);
+      const uRow = uRes.rows[0];
+      if (!uRow) return { ok: false, error: 'Sessão inválida. Inicie sessão novamente.' };
+      if (uRow.is_suspended) return { ok: false, error: 'Conta suspensa.' };
+
+      if (!params.isDemo && uRow.self_excluded_until) {
+        const exclTime = new Date(uRow.self_excluded_until as string | Date).getTime();
+        if (exclTime > Date.now()) {
+          return {
+            ok: false,
+            error: `Autoexclusão ativa até ${formatDatePtAo(uRow.self_excluded_until as string | Date)}. Apenas o Modo DEMO está disponível.`
+          };
+        }
+      }
+
+      const dupRes = await client.query(
+        `SELECT id FROM palanca_jet_bets
+         WHERE round_id = $1 AND user_id = $2 AND slot = $3 AND status = 'PLACED'
+         LIMIT 1`,
+        [params.roundId, params.userId, slot]
+      );
+      if (dupRes.rows.length > 0) {
+        return { ok: false, error: `Já tem uma aposta ativa no Painel ${slot + 1} desta ronda.` };
+      }
+
+      let updUserRes;
+      if (params.isDemo) {
+        if (Number(uRow.demo_kz_balance ?? 0) < amount) {
+          return { ok: false, error: 'Saldo Demo KZ insuficiente para esta aposta.' };
+        }
+        updUserRes = await client.query(
+          `UPDATE users SET demo_kz_balance = demo_kz_balance - $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+          [params.userId, amount]
+        );
+      } else {
+        const entryLimit =
+          uRow.daily_entry_limit_kz !== null && uRow.daily_entry_limit_kz !== undefined
+            ? Number(uRow.daily_entry_limit_kz)
+            : null;
+        const lossLimit =
+          uRow.daily_loss_limit_kz !== null && uRow.daily_loss_limit_kz !== undefined
+            ? Number(uRow.daily_loss_limit_kz)
+            : null;
+
+        if ((entryLimit && entryLimit > 0) || (lossLimit && lossLimit > 0)) {
+          const dailyRes = await client.query(
+            `SELECT
+               COALESCE(SUM(amount), 0) AS wagered,
+               COALESCE(SUM(CASE WHEN status = 'CASHED_OUT' THEN payout ELSE 0 END), 0) AS payouts
+             FROM palanca_jet_bets
+             WHERE user_id = $1
+               AND is_demo = false
+               AND status NOT IN ('CANCELLED', 'REFUNDED')
+               AND (created_at AT TIME ZONE 'Africa/Luanda')::date = (NOW() AT TIME ZONE 'Africa/Luanda')::date`,
+            [params.userId]
+          );
+          const wageredToday = Number(dailyRes.rows[0]?.wagered ?? 0);
+          const payoutsToday = Number(dailyRes.rows[0]?.payouts ?? 0);
+          const netLossToday = Math.max(0, wageredToday - payoutsToday);
+
+          if (entryLimit && entryLimit > 0 && wageredToday + amount > entryLimit) {
+            return {
+              ok: false,
+              error: `Limite diário de apostas (${entryLimit.toLocaleString('pt-AO')} Kz) atingido. Apostado hoje: ${wageredToday.toLocaleString('pt-AO')} Kz.`
+            };
+          }
+          if (lossLimit && lossLimit > 0 && netLossToday >= lossLimit) {
+            return {
+              ok: false,
+              error: `Limite diário de perdas (${lossLimit.toLocaleString('pt-AO')} Kz) atingido. Faça uma pausa ou jogue no Modo DEMO.`
+            };
+          }
+        }
+
+        if (Number(uRow.kz_balance ?? 0) < amount) {
+          return {
+            ok: false,
+            error: 'Saldo Real KZ insuficiente. Deposite na carteira ou use o Modo DEMO.'
+          };
+        }
+        updUserRes = await client.query(
+          `UPDATE users SET kz_balance = kz_balance - $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+          [params.userId, amount]
+        );
+
+        await client.query(
+          `INSERT INTO transactions (
+            id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes
+          ) VALUES ($1, $2, $3, 'JET_BET', 'KZ', $4, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $5, $6)`,
+          [
+            `tx_jbet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            params.userId,
+            String(uRow.name),
+            amount,
+            `JET-${params.roundNumber}-P${slot + 1}`,
+            `Aposta Palanca Jet (Ronda #${params.roundNumber} · Painel ${slot + 1})`
+          ]
+        );
+      }
+
+      const masked = maskPlayerName(String(uRow.name));
+      const insBet = await client.query(
+        `INSERT INTO palanca_jet_bets (
+          id, round_id, round_number, user_id, user_name, masked_name, slot, is_demo, amount, auto_cashout_multiplier, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLACED')
+        RETURNING *`,
+        [
+          betId,
+          params.roundId,
+          params.roundNumber,
+          params.userId,
+          String(uRow.name),
+          masked,
+          slot,
+          params.isDemo,
+          amount,
+          autoMult
+        ]
+      );
+
+      return {
+        ok: true,
+        bet: this.mapJetBetRow(insBet.rows[0]),
+        user: this.mapUserRow(updUserRes.rows[0])
+      };
+    });
+  }
+
+  async cancelJetBet(params: {
+    roundId: string;
+    userId: string;
+    slot: 0 | 1;
+  }): Promise<{ ok: true; betId: string; user: User } | { ok: false; error: string }> {
+    const slot: 0 | 1 = params.slot === 1 ? 1 : 0;
+
+    if (!this.pool) {
+      const round = this.memJetRounds.find((r) => r.id === params.roundId);
+      if (!round || round.status !== 'BETTING') {
+        return { ok: false, error: 'Já não é possível cancelar após o início do voo.' };
+      }
+      let target: StoredJetBet | undefined;
+      for (const b of this.memJetBets.values()) {
+        if (
+          b.roundId === params.roundId &&
+          b.userId === params.userId &&
+          b.slot === slot &&
+          b.status === 'PLACED'
+        ) {
+          target = b;
+          break;
+        }
+      }
+      if (!target) return { ok: false, error: 'Aposta ativa não encontrada neste painel.' };
+
+      const u = this.memUsers.get(params.userId);
+      if (!u) return { ok: false, error: 'Utilizador não encontrado.' };
+
+      target.status = 'CANCELLED';
+      if (target.isDemo) {
+        u.demoKzBalance = Number(((u.demoKzBalance ?? 0) + target.amount).toFixed(2));
+      } else {
+        u.kzBalance = Number((u.kzBalance + target.amount).toFixed(2));
+        this.memTransactions.unshift({
+          id: `tx_jcan_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          userId: u.id,
+          userName: u.name,
+          type: 'JET_REFUND',
+          currency: 'KZ',
+          amount: target.amount,
+          fee: 0,
+          status: 'Confirmado',
+          method: 'MULTICAIXA_EXPRESS',
+          reference: `JET-${target.roundNumber}-CANC`,
+          notes: `Cancelamento de aposta Palanca Jet (Ronda #${target.roundNumber} · Painel ${slot + 1})`,
+          createdAt: formatDatePtAo(new Date())
+        });
+      }
+      return { ok: true, betId: target.id, user: this.sanitizeUser(u) };
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const roundRes = await client.query(
+        `SELECT status FROM palanca_jet_rounds WHERE id = $1 FOR UPDATE`,
+        [params.roundId]
+      );
+      if (!roundRes.rows[0] || roundRes.rows[0].status !== 'BETTING') {
+        return { ok: false, error: 'Já não é possível cancelar após o início do voo.' };
+      }
+
+      const betRes = await client.query(
+        `SELECT * FROM palanca_jet_bets
+         WHERE round_id = $1 AND user_id = $2 AND slot = $3 AND status = 'PLACED'
+         FOR UPDATE`,
+        [params.roundId, params.userId, slot]
+      );
+      const bRow = betRes.rows[0];
+      if (!bRow) return { ok: false, error: 'Aposta ativa não encontrada neste painel.' };
+
+      await client.query(`UPDATE palanca_jet_bets SET status = 'CANCELLED' WHERE id = $1`, [bRow.id]);
+      const amount = Number(bRow.amount ?? 0);
+      const isDemo = Boolean(bRow.is_demo);
+
+      const uUpd = isDemo
+        ? await client.query(
+            `UPDATE users SET demo_kz_balance = demo_kz_balance + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [params.userId, amount]
+          )
+        : await client.query(
+            `UPDATE users SET kz_balance = kz_balance + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [params.userId, amount]
+          );
+
+      if (!isDemo) {
+        await client.query(
+          `INSERT INTO transactions (
+            id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes
+          ) VALUES ($1, $2, $3, 'JET_REFUND', 'KZ', $4, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $5, $6)`,
+          [
+            `tx_jcan_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            params.userId,
+            String(bRow.user_name || 'Jogador'),
+            amount,
+            `JET-${bRow.round_number}-CANC`,
+            `Cancelamento de aposta Palanca Jet (Ronda #${bRow.round_number} · Painel ${slot + 1})`
+          ]
+        );
+      }
+
+      return {
+        ok: true,
+        betId: String(bRow.id),
+        user: this.mapUserRow(uUpd.rows[0])
+      };
+    });
+  }
+
+  async cashoutJetBet(params: {
+    roundId: string;
+    betId: string;
+    userId: string;
+    multiplier: number;
+    maxWinKz: number;
+  }): Promise<
+    | { ok: true; bet: PalancaJetBet; user: User; payout: number }
+    | { ok: false; error: string }
+  > {
+    const cleanMult = Math.max(1.01, Math.floor(Number(params.multiplier) * 100) / 100);
+    const maxWin = Math.max(100, Math.round(Number(params.maxWinKz) || 500000));
+
+    if (!this.pool) {
+      const round = this.memJetRounds.find((r) => r.id === params.roundId);
+      if (!round || round.status !== 'FLYING') {
+        return { ok: false, error: 'Voo já terminou ou ainda não descolou.' };
+      }
+      const bet = this.memJetBets.get(params.betId);
+      if (!bet || bet.roundId !== params.roundId || bet.userId !== params.userId) {
+        return { ok: false, error: 'Aposta não encontrada.' };
+      }
+      if (bet.status !== 'PLACED') {
+        return { ok: false, error: 'Esta aposta já foi levantada ou encerrada.' };
+      }
+
+      const rawPayout = Number((bet.amount * cleanMult).toFixed(2));
+      const payout = Math.min(maxWin, rawPayout);
+      bet.status = 'CASHED_OUT';
+      bet.cashoutMultiplier = cleanMult;
+      bet.payout = payout;
+
+      const u = this.memUsers.get(params.userId);
+      if (!u) return { ok: false, error: 'Utilizador não encontrado.' };
+
+      if (bet.isDemo) {
+        u.demoKzBalance = Number(((u.demoKzBalance ?? 0) + payout).toFixed(2));
+      } else {
+        u.kzBalance = Number((u.kzBalance + payout).toFixed(2));
+        u.matchesPlayed += 1;
+        u.wins += 1;
+        u.totalEarnedKz = Number((u.totalEarnedKz + payout).toFixed(2));
+        u.category = computeCategory(u.wins);
+
+        this.memTransactions.unshift({
+          id: `tx_jwin_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          userId: u.id,
+          userName: u.name,
+          type: 'JET_WIN',
+          currency: 'KZ',
+          amount: payout,
+          fee: 0,
+          status: 'Pago',
+          method: 'MULTICAIXA_EXPRESS',
+          reference: `JET-${bet.roundNumber}-${cleanMult.toFixed(2)}x`,
+          notes: `Prémio Palanca Jet (${cleanMult.toFixed(2)}x sobre ${bet.amount.toLocaleString('pt-AO')} Kz)`,
+          createdAt: formatDatePtAo(new Date())
+        });
+      }
+
+      return { ok: true, bet: this.toPublicJetBet(bet), user: this.sanitizeUser(u), payout };
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const roundRes = await client.query(
+        `SELECT status FROM palanca_jet_rounds WHERE id = $1`,
+        [params.roundId]
+      );
+      if (!roundRes.rows[0] || roundRes.rows[0].status !== 'FLYING') {
+        return { ok: false, error: 'Voo já terminou ou ainda não descolou.' };
+      }
+
+      const betRes = await client.query(
+        `SELECT * FROM palanca_jet_bets WHERE id = $1 AND round_id = $2 AND user_id = $3 FOR UPDATE`,
+        [params.betId, params.roundId, params.userId]
+      );
+      const bRow = betRes.rows[0];
+      if (!bRow) return { ok: false, error: 'Aposta não encontrada.' };
+      if (bRow.status !== 'PLACED') {
+        return { ok: false, error: 'Esta aposta já foi levantada ou encerrada.' };
+      }
+
+      const stake = Number(bRow.amount ?? 0);
+      const payout = Math.min(maxWin, Number((stake * cleanMult).toFixed(2)));
+      const isDemo = Boolean(bRow.is_demo);
+
+      const updBet = await client.query(
+        `UPDATE palanca_jet_bets
+         SET status = 'CASHED_OUT', cashout_multiplier = $2, payout = $3
+         WHERE id = $1
+         RETURNING *`,
+        [params.betId, cleanMult, payout]
+      );
+
+      const uRes = await client.query(`SELECT * FROM users WHERE id = $1 FOR UPDATE`, [params.userId]);
+      const uRow = uRes.rows[0];
+      if (!uRow) return { ok: false, error: 'Utilizador não encontrado.' };
+
+      let updUserRes;
+      if (isDemo) {
+        updUserRes = await client.query(
+          `UPDATE users SET demo_kz_balance = demo_kz_balance + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+          [params.userId, payout]
+        );
+      } else {
+        const nextWins = Number(uRow.wins ?? 0) + 1;
+        updUserRes = await client.query(
+          `UPDATE users
+           SET kz_balance = kz_balance + $2,
+               matches_played = matches_played + 1,
+               wins = wins + 1,
+               total_earned_kz = total_earned_kz + $2,
+               category = $3,
+               updated_at = NOW()
+           WHERE id = $1 RETURNING *`,
+          [params.userId, payout, computeCategory(nextWins)]
+        );
+
+        await client.query(
+          `INSERT INTO transactions (
+            id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes
+          ) VALUES ($1, $2, $3, 'JET_WIN', 'KZ', $4, 0, 'Pago', 'MULTICAIXA_EXPRESS', $5, $6)`,
+          [
+            `tx_jwin_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            params.userId,
+            String(uRow.name),
+            payout,
+            `JET-${bRow.round_number}-${cleanMult.toFixed(2)}x`,
+            `Prémio Palanca Jet (${cleanMult.toFixed(2)}x sobre ${stake.toLocaleString('pt-AO')} Kz)`
+          ]
+        );
+      }
+
+      return {
+        ok: true,
+        bet: this.mapJetBetRow(updBet.rows[0]),
+        user: this.mapUserRow(updUserRes.rows[0]),
+        payout
+      };
+    });
+  }
+
+  async settleJetRoundCrash(params: {
+    roundId: string;
+    crashPoint: number;
+  }): Promise<{ affectedUsers: User[]; settledBets: PalancaJetBet[] }> {
+    const nowDisplay = formatDatePtAo(new Date());
+
+    if (!this.pool) {
+      const round = this.memJetRounds.find((r) => r.id === params.roundId);
+      if (round) {
+        round.status = 'CRASHED';
+        round.crashedAtIso = new Date().toISOString();
+      }
+
+      const affectedMap = new Map<string, User>();
+      const settledBets: PalancaJetBet[] = [];
+      const realParticipants = new Map<string, { name: string; staked: number; payout: number }>();
+
+      for (const b of this.memJetBets.values()) {
+        if (b.roundId !== params.roundId) continue;
+
+        if (b.status === 'PLACED') {
+          b.status = 'LOST';
+          b.payout = 0;
+          const u = this.memUsers.get(b.userId);
+          if (u && !b.isDemo) {
+            u.matchesPlayed += 1;
+            u.losses += 1;
+            u.totalLostKz = Number((u.totalLostKz + b.amount).toFixed(2));
+            u.category = computeCategory(u.wins);
+            affectedMap.set(u.id, this.sanitizeUser(u));
+
+            this.memTransactions.unshift({
+              id: `tx_jlos_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+              userId: u.id,
+              userName: u.name,
+              type: 'JET_LOSS',
+              currency: 'KZ',
+              amount: b.amount,
+              fee: 0,
+              status: 'Confirmado',
+              method: 'MULTICAIXA_EXPRESS',
+              reference: `JET-${b.roundNumber}-CRASH`,
+              notes: `Voo Palanca Jet terminou em ${params.crashPoint.toFixed(2)}x (Ronda #${b.roundNumber})`,
+              createdAt: nowDisplay
+            });
+          }
+        }
+
+        if (b.status !== 'CANCELLED' && b.status !== 'REFUNDED') {
+          settledBets.push(this.toPublicJetBet(b));
+          if (!b.isDemo) {
+            const cur = realParticipants.get(b.userId) || { name: b.userName, staked: 0, payout: 0 };
+            cur.staked += b.amount;
+            cur.payout += b.payout;
+            realParticipants.set(b.userId, cur);
+          }
+        }
+      }
+
+      if (round && realParticipants.size > 0) {
+        const totalStaked = Array.from(realParticipants.values()).reduce((s, p) => s + p.staked, 0);
+        const totalPayout = Array.from(realParticipants.values()).reduce((s, p) => s + p.payout, 0);
+        const topWinner = Array.from(realParticipants.entries()).sort(
+          (a, b) => b[1].payout - a[1].payout
+        )[0];
+
+        this.memMatches.unshift({
+          id: `mh_jet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+          gameType: 'palanca_jet',
+          roomId: round.id,
+          roomCode: `JET-${round.roundNumber}`,
+          roomName: `Palanca Jet #${round.roundNumber} · ${params.crashPoint.toFixed(2)}x`,
+          winnerUserId: topWinner && topWinner[1].payout > 0 ? topWinner[0] : null,
+          winnerName:
+            topWinner && topWinner[1].payout > 0 ? topWinner[1].name : 'Banca N',
+          winnerColor: null,
+          currency: 'KZ',
+          betAmount: totalStaked,
+          totalPot: totalStaked,
+          prizePool: totalPayout,
+          platformCommission: Math.max(0, Number((totalStaked - totalPayout).toFixed(2))),
+          isDemo: false,
+          boardTheme: 'classic',
+          players: Array.from(realParticipants.entries()).map(([uid, info]) => ({
+            userId: uid,
+            name: info.name,
+            color: info.payout > 0 ? 'yellow' : 'red',
+            isBot: false
+          })),
+          finishedAt: nowDisplay
+        });
+      }
+
+      return { affectedUsers: Array.from(affectedMap.values()), settledBets };
+    }
+
+    return this.withPgTransaction(async (client) => {
+      const roundUpd = await client.query(
+        `UPDATE palanca_jet_rounds SET status = 'CRASHED', crashed_at = NOW() WHERE id = $1 RETURNING *`,
+        [params.roundId]
+      );
+      const roundRow = roundUpd.rows[0];
+      const roundNumber = Number(roundRow?.round_number ?? 0);
+
+      const lostBetsRes = await client.query(
+        `SELECT * FROM palanca_jet_bets WHERE round_id = $1 AND status = 'PLACED' FOR UPDATE`,
+        [params.roundId]
+      );
+
+      const affectedMap = new Map<string, User>();
+      for (const bRow of lostBetsRes.rows) {
+        await client.query(`UPDATE palanca_jet_bets SET status = 'LOST', payout = 0 WHERE id = $1`, [
+          bRow.id
+        ]);
+
+        if (!bRow.is_demo) {
+          const uRes = await client.query(`SELECT * FROM users WHERE id = $1 FOR UPDATE`, [
+            bRow.user_id
+          ]);
+          const uRow = uRes.rows[0];
+          if (uRow) {
+            const wins = Number(uRow.wins ?? 0);
+            const updU = await client.query(
+              `UPDATE users
+               SET matches_played = matches_played + 1,
+                   losses = losses + 1,
+                   total_lost_kz = total_lost_kz + $2,
+                   category = $3,
+                   updated_at = NOW()
+               WHERE id = $1 RETURNING *`,
+              [bRow.user_id, Number(bRow.amount ?? 0), computeCategory(wins)]
+            );
+            affectedMap.set(String(bRow.user_id), this.mapUserRow(updU.rows[0]));
+
+            await client.query(
+              `INSERT INTO transactions (
+                id, user_id, user_name, type, currency, amount, fee, status, method, reference, notes
+              ) VALUES ($1, $2, $3, 'JET_LOSS', 'KZ', $4, 0, 'Confirmado', 'MULTICAIXA_EXPRESS', $5, $6)`,
+              [
+                `tx_jlos_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+                bRow.user_id,
+                String(uRow.name),
+                Number(bRow.amount ?? 0),
+                `JET-${roundNumber}-CRASH`,
+                `Voo Palanca Jet terminou em ${params.crashPoint.toFixed(2)}x (Ronda #${roundNumber})`
+              ]
+            );
+          }
+        }
+      }
+
+      const allBetsRes = await client.query(
+        `SELECT * FROM palanca_jet_bets WHERE round_id = $1 AND status NOT IN ('CANCELLED', 'REFUNDED') ORDER BY created_at ASC`,
+        [params.roundId]
+      );
+      const settledBets = allBetsRes.rows.map((r) => this.mapJetBetRow(r));
+
+      const realRows = allBetsRes.rows.filter((r) => !r.is_demo);
+      if (realRows.length > 0) {
+        const realParticipants = new Map<string, { name: string; staked: number; payout: number }>();
+        for (const r of realRows) {
+          const uid = String(r.user_id);
+          const cur = realParticipants.get(uid) || {
+            name: String(r.user_name || 'Jogador'),
+            staked: 0,
+            payout: 0
+          };
+          cur.staked += Number(r.amount ?? 0);
+          cur.payout += Number(r.payout ?? 0);
+          realParticipants.set(uid, cur);
+        }
+        const totalStaked = Array.from(realParticipants.values()).reduce((s, p) => s + p.staked, 0);
+        const totalPayout = Array.from(realParticipants.values()).reduce((s, p) => s + p.payout, 0);
+        const topWinner = Array.from(realParticipants.entries()).sort(
+          (a, b) => b[1].payout - a[1].payout
+        )[0];
+
+        await client.query(
+          `INSERT INTO match_history (
+            id, match_key, game_type, room_id, room_code, room_name, winner_user_id, winner_name, winner_color,
+            currency, bet_amount, total_pot, prize_pool, platform_commission, is_demo, board_theme, players
+          ) VALUES ($1, $2, 'palanca_jet', $3, $4, $5, $6, $7, NULL, 'KZ', $8, $8, $9, $10, false, 'classic', $11::jsonb)
+          ON CONFLICT (match_key) DO NOTHING`,
+          [
+            `mh_jet_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            `jet:${params.roundId}`,
+            params.roundId,
+            `JET-${roundNumber}`,
+            `Palanca Jet #${roundNumber} · ${params.crashPoint.toFixed(2)}x`,
+            topWinner && topWinner[1].payout > 0 ? topWinner[0] : null,
+            topWinner && topWinner[1].payout > 0 ? topWinner[1].name : 'Banca N',
+            totalStaked,
+            totalPayout,
+            Math.max(0, Number((totalStaked - totalPayout).toFixed(2))),
+            JSON.stringify(
+              Array.from(realParticipants.entries()).map(([uid, info]) => ({
+                userId: uid,
+                name: info.name,
+                color: info.payout > 0 ? 'yellow' : 'red',
+                isBot: false
+              }))
+            )
+          ]
+        );
+      }
+
+      return { affectedUsers: Array.from(affectedMap.values()), settledBets };
+    });
+  }
+
+  async getJetHistory(limit = 25): Promise<PalancaJetHistoryRound[]> {
+    if (!this.pool) {
+      return this.memJetRounds
+        .filter((r) => r.status === 'CRASHED')
+        .sort((a, b) => b.roundNumber - a.roundNumber)
+        .slice(0, limit)
+        .map((r) => ({
+          id: r.id,
+          roundNumber: r.roundNumber,
+          seedHash: r.seedHash,
+          serverSeed: r.serverSeed,
+          crashPoint: r.crashPoint,
+          houseEdgePercent: r.houseEdgePercent,
+          crashedAt: formatDatePtAo(r.crashedAtIso || r.createdAtIso)
+        }));
+    }
+
+    const res = await this.pool.query(
+      `SELECT id, round_number, seed_hash, server_seed, crash_point, house_edge_percent, crashed_at, created_at
+       FROM palanca_jet_rounds
+       WHERE status = 'CRASHED'
+       ORDER BY round_number DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      roundNumber: Number(r.round_number ?? 0),
+      seedHash: String(r.seed_hash),
+      serverSeed: String(r.server_seed),
+      crashPoint: Number(r.crash_point ?? 1),
+      houseEdgePercent: Number(r.house_edge_percent ?? 5),
+      crashedAt: formatDatePtAo((r.crashed_at || r.created_at) as string | Date)
+    }));
+  }
+
+  async getJetRoundByIdOrNumber(roundKey: string): Promise<{
+    id: string;
+    roundNumber: number;
+    status: string;
+    seedHash: string;
+    serverSeed: string | null;
+    crashPoint: number | null;
+    houseEdgePercent: number;
+    crashedAt: string | null;
+  } | null> {
+    const clean = String(roundKey || '').trim();
+    if (!clean) return null;
+    const asNum = /^\d+$/.test(clean) ? Number(clean) : -1;
+
+    if (!this.pool) {
+      const r = this.memJetRounds.find((x) => x.id === clean || (asNum > 0 && x.roundNumber === asNum));
+      if (!r) return null;
+      const isRevealed = r.status === 'CRASHED';
+      return {
+        id: r.id,
+        roundNumber: r.roundNumber,
+        status: r.status,
+        seedHash: r.seedHash,
+        serverSeed: isRevealed ? r.serverSeed : null,
+        crashPoint: isRevealed ? r.crashPoint : null,
+        houseEdgePercent: r.houseEdgePercent,
+        crashedAt: r.crashedAtIso ? formatDatePtAo(r.crashedAtIso) : null
+      };
+    }
+
+    const res = await this.pool.query(
+      `SELECT * FROM palanca_jet_rounds WHERE id = $1 OR round_number = $2 ORDER BY round_number DESC LIMIT 1`,
+      [clean, asNum]
+    );
+    const r = res.rows[0];
+    if (!r) return null;
+    const isRevealed = r.status === 'CRASHED';
+    return {
+      id: String(r.id),
+      roundNumber: Number(r.round_number ?? 0),
+      status: String(r.status),
+      seedHash: String(r.seed_hash),
+      serverSeed: isRevealed ? String(r.server_seed) : null,
+      crashPoint: isRevealed ? Number(r.crash_point ?? 1) : null,
+      houseEdgePercent: Number(r.house_edge_percent ?? 5),
+      crashedAt: r.crashed_at ? formatDatePtAo(r.crashed_at as string | Date) : null
     };
   }
 

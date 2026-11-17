@@ -14,14 +14,18 @@ import {
   ThemePriceConfig,
   MatchHistoryEntry,
   AdminOverview,
-  AppNotification
+  AppNotification,
+  PalancaJetBet,
+  PalancaJetChatMessage,
+  PalancaJetPublicState
 } from '../types';
 import { soundManager } from '../utils/soundEffects';
 import { getNextPosition } from '../utils/ludoRules';
 import { BOARD_THEMES } from '../utils/boardThemes';
 import { getBaseCaptureSkill } from '../utils/captureSkills';
+import { DEFAULT_JET_CONFIG, sanitizeJetConfig } from '../utils/palancaJetEngine';
 
-export type ActiveTab = 'dashboard' | 'game' | 'rooms' | 'wallet' | 'ranking' | 'support' | 'admin';
+export type ActiveTab = 'dashboard' | 'game' | 'rooms' | 'jet' | 'wallet' | 'ranking' | 'support' | 'admin';
 
 export interface ActionResult {
   ok: boolean;
@@ -147,6 +151,43 @@ interface GameContextType {
   isAdminUnlocked: boolean;
   unlockAdmin: (pin: string) => Promise<boolean>;
   lockAdmin: () => void;
+  // Palanca Jet & Responsible Gaming (+18)
+  jetState: PalancaJetPublicState | null;
+  fetchJetState: () => Promise<PalancaJetPublicState | null>;
+  placeJetBet: (params: {
+    roundId: string;
+    slot: 0 | 1;
+    amount: number;
+    isDemo: boolean;
+    autoCashoutMultiplier: number | null;
+  }) => Promise<ActionResult & { bet?: PalancaJetBet }>;
+  cancelJetBet: (params: { roundId: string; slot: 0 | 1 }) => Promise<ActionResult>;
+  cashoutJetBet: (params: {
+    roundId: string;
+    betId: string;
+  }) => Promise<ActionResult & { bet?: PalancaJetBet; payout?: number }>;
+  sendJetChat: (text: string) => void;
+  verifyJetRound: (roundKey: string) => Promise<
+    | {
+        ok: true;
+        round: {
+          id: string;
+          roundNumber: number;
+          status: string;
+          seedHash: string;
+          serverSeed: string | null;
+          crashPoint: number | null;
+          houseEdgePercent: number;
+          crashedAt: string | null;
+        };
+      }
+    | { ok: false; error: string }
+  >;
+  updateResponsibleGaming: (params: {
+    dailyEntryLimitKz?: number | null;
+    dailyLossLimitKz?: number | null;
+    selfExclusionHours?: number | null;
+  }) => Promise<ActionResult>;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
@@ -168,6 +209,9 @@ const GUEST_USER: User = {
   demoUsdtBalance: 50,
   kzReserved: 0,
   usdtReserved: 0,
+  dailyEntryLimitKz: null,
+  dailyLossLimitKz: null,
+  selfExcludedUntil: null,
   matchesPlayed: 0,
   wins: 0,
   losses: 0,
@@ -206,7 +250,9 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     future: { priceKz: 20000, priceUsdt: 22 },
     gang: { priceKz: 18000, priceUsdt: 20 },
     egyptian: { priceKz: 22000, priceUsdt: 24 }
-  }
+  },
+  minWithdrawKz: 500,
+  jetConfig: DEFAULT_JET_CONFIG
 };
 
 function readStoredToken(key: string): string | null {
@@ -279,7 +325,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     try {
       const tabParam = new URLSearchParams(window.location.search).get('tab');
-      if (tabParam === 'wallet' || tabParam === 'rooms' || tabParam === 'ranking' || tabParam === 'support') {
+      if (
+        tabParam === 'wallet' ||
+        tabParam === 'rooms' ||
+        tabParam === 'jet' ||
+        tabParam === 'ranking' ||
+        tabParam === 'support'
+      ) {
         return tabParam;
       }
     } catch {
@@ -315,6 +367,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
   const [rankingList, setRankingList] = useState<RankingPlayer[]>([]);
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
+  const [jetState, setJetState] = useState<PalancaJetPublicState | null>(null);
 
   const [pushVapidPublicKey, setPushVapidPublicKey] = useState<string | null>(null);
   const [pushAvailableOnServer, setPushAvailableOnServer] = useState<boolean>(false);
@@ -415,13 +468,17 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applyNormalizedPlatformConfig = useCallback((srvCfg?: Partial<PlatformConfig>) => {
     if (!srvCfg) return;
+    const rawMin = Number(srvCfg.minWithdrawKz);
     setPlatformConfig({
       winnerPercent: Number(srvCfg.winnerPercent) || DEFAULT_PLATFORM_CONFIG.winnerPercent,
       commissionPercent: Number(srvCfg.commissionPercent) || DEFAULT_PLATFORM_CONFIG.commissionPercent,
       themePrices: {
         ...DEFAULT_PLATFORM_CONFIG.themePrices,
         ...(srvCfg.themePrices || {})
-      }
+      },
+      minWithdrawKz:
+        Number.isFinite(rawMin) && rawMin >= 100 ? Math.round(rawMin) : DEFAULT_PLATFORM_CONFIG.minWithdrawKz,
+      jetConfig: sanitizeJetConfig(srvCfg.jetConfig)
     });
   }, []);
 
@@ -449,10 +506,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     let cancelled = false;
     const hydrate = async () => {
-      const [cfgRes, payRes, rankRes] = await Promise.all([
+      const [cfgRes, payRes, rankRes, jetRes] = await Promise.all([
         apiJson<{ config: PlatformConfig }>('/api/platform-config'),
         apiJson<{ paymentSettings: PaymentSettings }>('/api/payment-settings'),
-        apiJson<{ ranking: RankingPlayer[] }>('/api/ranking')
+        apiJson<{ ranking: RankingPlayer[] }>('/api/ranking'),
+        apiJson<{ state: PalancaJetPublicState; jetConfig?: PlatformConfig['jetConfig'] }>('/api/jet/state')
       ]);
 
       if (cancelled) return;
@@ -464,6 +522,9 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       if (rankRes.ok && Array.isArray(rankRes.data.ranking)) {
         setRankingList(rankRes.data.ranking);
+      }
+      if (jetRes.ok && jetRes.data.state) {
+        setJetState(jetRes.data.state);
       }
 
       const storedUserToken = readStoredToken(TOKEN_STORAGE_KEY);
@@ -644,6 +705,61 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (isAdminUnlockedRef.current) {
             void refreshAdminOverview();
           }
+          return;
+        }
+
+        if (type === 'jet:state') {
+          const incomingState = msg.state as PalancaJetPublicState | undefined;
+          if (incomingState && incomingState.roundId) {
+            setJetState(incomingState);
+          }
+          return;
+        }
+
+        if (type === 'jet:tick') {
+          const tickRoundId = String(msg.roundId || '');
+          const tickPhase = msg.phase as PalancaJetPublicState['phase'] | undefined;
+          const tickMult = Number(msg.multiplier);
+          const tickRemaining = Number(msg.bettingRemainingMs);
+          const tickElapsed = Number(msg.elapsedMs);
+          const tickNow = Number(msg.serverNowMs);
+          if (!tickRoundId || !tickPhase) return;
+          setJetState((prev) => {
+            if (!prev || prev.roundId !== tickRoundId) return prev;
+            return {
+              ...prev,
+              phase: tickPhase,
+              multiplier: Number.isFinite(tickMult) ? tickMult : prev.multiplier,
+              bettingRemainingMs: Number.isFinite(tickRemaining) ? tickRemaining : prev.bettingRemainingMs,
+              elapsedMs: Number.isFinite(tickElapsed) ? tickElapsed : prev.elapsedMs,
+              serverNowMs: Number.isFinite(tickNow) ? tickNow : prev.serverNowMs
+            };
+          });
+          return;
+        }
+
+        if (type === 'jet:bets') {
+          const betsRoundId = String(msg.roundId || '');
+          const nextBets = msg.bets as PalancaJetBet[] | undefined;
+          if (!betsRoundId || !Array.isArray(nextBets)) return;
+          setJetState((prev) => {
+            if (!prev || prev.roundId !== betsRoundId) return prev;
+            return { ...prev, bets: nextBets };
+          });
+          return;
+        }
+
+        if (type === 'jet:chat') {
+          const incomingMsg = msg.message as PalancaJetChatMessage | undefined;
+          if (!incomingMsg || !incomingMsg.id) return;
+          if (incomingMsg.userId !== currentUserRef.current.id) {
+            soundManager.playMessagePop();
+          }
+          setJetState((prev) => {
+            if (!prev) return prev;
+            if (prev.chat.some((c) => c.id === incomingMsg.id)) return prev;
+            return { ...prev, chat: [...prev.chat.slice(-49), incomingMsg] };
+          });
           return;
         }
 
@@ -1377,6 +1493,165 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // ---------- Palanca Jet & Responsible Gaming (+18) ----------
+
+  const fetchJetState = useCallback(async (): Promise<PalancaJetPublicState | null> => {
+    const res = await apiJson<{ state: PalancaJetPublicState; jetConfig?: PlatformConfig['jetConfig'] }>(
+      '/api/jet/state'
+    );
+    if (!res.ok || !res.data.state) return null;
+    setJetState(res.data.state);
+    if (res.data.jetConfig) {
+      setPlatformConfig((prev) => ({
+        ...prev,
+        jetConfig: sanitizeJetConfig(res.data.jetConfig)
+      }));
+    }
+    return res.data.state;
+  }, []);
+
+  const placeJetBet = async (params: {
+    roundId: string;
+    slot: 0 | 1;
+    amount: number;
+    isDemo: boolean;
+    autoCashoutMultiplier: number | null;
+  }): Promise<ActionResult & { bet?: PalancaJetBet }> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Sessão expirada.' };
+
+    const res = await apiJson<{ bet: PalancaJetBet; user: User }>('/api/jet/bet', {
+      method: 'POST',
+      token,
+      body: params
+    });
+
+    if (!res.ok) return { ok: false, error: res.error };
+
+    soundManager.playCoin();
+    if (res.data.user) {
+      setCurrentUser((prev) => ({ ...res.data.user, role: prev.role }));
+    }
+    if (res.data.bet) {
+      setJetState((prev) => {
+        if (!prev || prev.roundId !== params.roundId) return prev;
+        const exists = prev.bets.some((b) => b.id === res.data.bet.id);
+        return {
+          ...prev,
+          bets: exists ? prev.bets : [...prev.bets, res.data.bet]
+        };
+      });
+    }
+    return { ok: true, bet: res.data.bet };
+  };
+
+  const cancelJetBet = async (params: { roundId: string; slot: 0 | 1 }): Promise<ActionResult> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Sessão expirada.' };
+
+    const res = await apiJson<{ user: User }>('/api/jet/cancel', {
+      method: 'POST',
+      token,
+      body: params
+    });
+
+    if (!res.ok) return { ok: false, error: res.error };
+
+    if (res.data.user) {
+      setCurrentUser((prev) => ({ ...res.data.user, role: prev.role }));
+    }
+    setJetState((prev) => {
+      if (!prev || prev.roundId !== params.roundId) return prev;
+      return {
+        ...prev,
+        bets: prev.bets.filter(
+          (b) => !(b.userId === currentUserRef.current.id && b.slot === params.slot && b.status === 'PLACED')
+        )
+      };
+    });
+    return { ok: true };
+  };
+
+  const cashoutJetBet = async (params: {
+    roundId: string;
+    betId: string;
+  }): Promise<ActionResult & { bet?: PalancaJetBet; payout?: number }> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Sessão expirada.' };
+
+    const res = await apiJson<{ bet: PalancaJetBet; user: User; payout: number }>('/api/jet/cashout', {
+      method: 'POST',
+      token,
+      body: params
+    });
+
+    if (!res.ok) return { ok: false, error: res.error };
+
+    soundManager.playJetCashout();
+    if (res.data.user) {
+      setCurrentUser((prev) => ({ ...res.data.user, role: prev.role }));
+    }
+    if (res.data.bet) {
+      setJetState((prev) => {
+        if (!prev || prev.roundId !== params.roundId) return prev;
+        return {
+          ...prev,
+          bets: prev.bets.map((b) => (b.id === res.data.bet.id ? res.data.bet : b))
+        };
+      });
+    }
+    return { ok: true, bet: res.data.bet, payout: res.data.payout };
+  };
+
+  const sendJetChat = (text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    soundManager.playMessagePop();
+    sendWs({ type: 'jet:chat', text: clean });
+  };
+
+  const verifyJetRound = useCallback(async (roundKey: string) => {
+    const clean = roundKey.trim();
+    if (!clean) return { ok: false as const, error: 'Indique o número ou ID da ronda.' };
+    const res = await apiJson<{
+      round: {
+        id: string;
+        roundNumber: number;
+        status: string;
+        seedHash: string;
+        serverSeed: string | null;
+        crashPoint: number | null;
+        houseEdgePercent: number;
+        crashedAt: string | null;
+      };
+    }>(`/api/jet/verify/${encodeURIComponent(clean)}`);
+    if (!res.ok || !res.data.round) {
+      return { ok: false as const, error: res.ok ? 'Ronda não encontrada.' : res.error };
+    }
+    return { ok: true as const, round: res.data.round };
+  }, []);
+
+  const updateResponsibleGaming = async (params: {
+    dailyEntryLimitKz?: number | null;
+    dailyLossLimitKz?: number | null;
+    selfExclusionHours?: number | null;
+  }): Promise<ActionResult> => {
+    const token = authToken || adminToken;
+    if (!token) return { ok: false, error: 'Sessão expirada.' };
+
+    const res = await apiJson<{ user: User }>('/api/me/responsible-gaming', {
+      method: 'PATCH',
+      token,
+      body: params
+    });
+
+    if (!res.ok) return { ok: false, error: res.error };
+
+    soundManager.playCoin();
+    setCurrentUser((prev) => ({ ...res.data.user, role: prev.role }));
+    return { ok: true };
+  };
+
   // ---------- Financial Requests (100% Server-Authoritative) ----------
 
   const requestDeposit = async (params: {
@@ -1674,7 +1949,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         pushError,
         isIOSDevice,
         isStandalonePWA,
-        togglePushNotifications
+        togglePushNotifications,
+        jetState,
+        fetchJetState,
+        placeJetBet,
+        cancelJetBet,
+        cashoutJetBet,
+        sendJetChat,
+        verifyJetRound,
+        updateResponsibleGaming
       }}
     >
       {children}

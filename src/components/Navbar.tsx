@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useGame } from '../context/GameContext';
-import { Volume2, VolumeX, Shield, Wallet, Trophy, Swords, Home, HelpCircle, Lock, Unlock, LogOut, User, Sparkles, Gamepad2 } from 'lucide-react';
+import { Volume2, VolumeX, Shield, Wallet, Trophy, Swords, Home, HelpCircle, Lock, Unlock, LogOut, User, Sparkles, Gamepad2, Plane } from 'lucide-react';
 import { AdminPinModal } from './AdminPinModal';
 import { EditProfileModal } from './EditProfileModal';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -69,12 +69,21 @@ export const Navbar: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveTab('rooms')}
-              className={`flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+              className={`flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'rooms' || activeTab === 'game' ? 'text-yellow-400 font-semibold' : 'text-neutral-300 hover:text-white'
               }`}
             >
               <Swords className="w-4 h-4" />
               Mesas de Jogo
+            </button>
+            <button
+              onClick={() => setActiveTab('jet')}
+              className={`flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'jet' ? 'text-yellow-400 font-semibold' : 'text-neutral-300 hover:text-white'
+              }`}
+            >
+              <Plane className="w-4 h-4" />
+              Palanca Jet
             </button>
             <button
               onClick={() => setActiveTab('wallet')}
@@ -260,10 +269,17 @@ export const Navbar: React.FC = () => {
           </button>
           <button
             onClick={() => setActiveTab('rooms')}
-            className={`flex flex-col items-center gap-0.5 ${activeTab === 'rooms' || activeTab === 'game' ? 'text-yellow-400 font-semibold' : ''}`}
+            className={`flex flex-col items-center gap-0.5 whitespace-nowrap ${activeTab === 'rooms' || activeTab === 'game' ? 'text-yellow-400 font-semibold' : ''}`}
           >
             <Swords className="w-4 h-4" />
-            <span>Jogar</span>
+            <span>Ludo</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('jet')}
+            className={`flex flex-col items-center gap-0.5 whitespace-nowrap ${activeTab === 'jet' ? 'text-yellow-400 font-semibold' : ''}`}
+          >
+            <Plane className="w-4 h-4" />
+            <span>Palanca</span>
           </button>
           <button
             onClick={() => setActiveTab('wallet')}

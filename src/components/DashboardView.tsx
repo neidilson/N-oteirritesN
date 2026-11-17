@@ -14,7 +14,8 @@ import {
   Gamepad2,
   KeyRound,
   Wifi,
-  Bot
+  Bot,
+  Plane
 } from 'lucide-react';
 import { EditProfileModal } from './EditProfileModal';
 
@@ -117,7 +118,14 @@ export const DashboardView: React.FC = () => {
                   className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-yellow-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-red-950/60 hover:brightness-110 active:scale-95 transition-all"
                 >
                   <Play className="w-4 h-4 fill-white" />
-                  JOGAR AGORA
+                  JOGAR LUDO AGORA
+                </button>
+                <button
+                  onClick={() => setActiveTab('jet')}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-red-600 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-amber-950/60 hover:brightness-110 active:scale-95 transition-all"
+                >
+                  <Plane className="w-4 h-4" />
+                  PALANCA JET · CRASH
                 </button>
                 <button
                   onClick={() => setActiveTab('wallet')}
@@ -147,32 +155,54 @@ export const DashboardView: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 pt-1 border-t border-neutral-800/80">
+            <div className="grid grid-cols-2 gap-4 pt-1 border-t border-neutral-800/80">
               <div className="text-left">
                 <span className="text-[9px] uppercase tracking-wider text-red-400 font-bold block">
                   SALDO REAL (KZ)
                 </span>
-                <span className="text-xl font-black text-white tabular-nums">
+                <span className="text-lg sm:text-xl font-black text-white tabular-nums">
                   {currentUser.kzBalance.toLocaleString('pt-AO')} <span className="text-[10px] text-neutral-400">Kz</span>
                 </span>
                 <span className="text-[8px] text-neutral-500 block leading-tight">
-                  {currentUser.kzBalance === 0 ? 'Requer depósito aprovado pelo Admin' : 'Saldo confirmado'}
+                  {currentUser.kzBalance === 0 ? 'Requer depósito aprovado pelo Admin' : 'Levantável & apostas'}
                 </span>
               </div>
               <div className="text-left">
                 <span className="text-[9px] uppercase tracking-wider text-yellow-400 font-bold block">
                   SALDO DEMO (KZ)
                 </span>
-                <span className="text-xl font-black text-yellow-300 tabular-nums">
+                <span className="text-lg sm:text-xl font-black text-yellow-300 tabular-nums">
                   {(currentUser.demoKzBalance ?? 50000).toLocaleString('pt-AO')} <span className="text-[10px] text-yellow-500">Kz</span>
                 </span>
                 <span className="text-[8px] text-yellow-600 block leading-tight">
-                  Simulado para treinar nas mesas
+                  Simulado para treinar grátis
                 </span>
               </div>
             </div>
           </div>
         </div>
+      </div>
+
+      {/* DESTAQUE: PALANCA JET */}
+      <div className="rounded-2xl p-5 sm:p-6 bg-gradient-to-r from-[#1f130d] via-[#171115] to-[#121318] border border-amber-500/40 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Plane className="w-5 h-5 text-yellow-400" />
+            <h2 className="text-base sm:text-lg font-black text-white">
+              Palanca Jet · Voo Crash Multiplayer sobre Angola (+18)
+            </h2>
+          </div>
+          <p className="text-xs text-neutral-300 max-w-2xl">
+            Faça até 2 apostas por voo, acompanhe o jato subir sobre Luanda e levante os seus prémios no multiplicador certo antes do crash. Rondas 100% verificáveis (Provably Fair SHA-256).
+          </p>
+        </div>
+        <button
+          onClick={() => setActiveTab('jet')}
+          className="px-5 py-3 rounded-xl bg-gradient-to-r from-red-600 via-orange-500 to-yellow-500 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-red-950/60 shrink-0 transition-all"
+        >
+          <Play className="w-4 h-4 fill-white" />
+          Abrir Palanca Jet
+        </button>
       </div>
 
       {/* 10 ATALHOS OBRIGATÓRIOS DO DASHBOARD (Specified in project spec) */}

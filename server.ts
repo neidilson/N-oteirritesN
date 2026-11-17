@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express, { Request, Response, NextFunction } from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -20,7 +21,12 @@ import type {
   PlatformConfig,
   PaymentMethod,
   AppNotification,
-  NotificationType
+  NotificationType,
+  PalancaJetBet,
+  PalancaJetChatMessage,
+  PalancaJetHistoryRound,
+  PalancaJetPhase,
+  PalancaJetPublicState
 } from './src/types/index.ts';
 import {
   SAFE_CELLS,
@@ -30,6 +36,11 @@ import {
   getRandomPositiveExpression,
   getRandomNegativeExpression
 } from './src/utils/ludoRules.ts';
+import {
+  computeCrashPointFromGameHashHex,
+  computeElapsedMsForMultiplier,
+  computeMultiplierAtElapsedMs
+} from './src/utils/palancaJetEngine.ts';
 import {
   db,
   DEFAULT_PLATFORM_CONFIG,
@@ -1075,9 +1086,452 @@ function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
   next();
 }
 
+// =========================================================
+// Palanca Jet — Server-Authoritative Multiplayer Crash Loop
+// =========================================================
+
+class PalancaJetManager {
+  private phase: PalancaJetPhase = 'BETTING';
+  private roundId = '';
+  private roundNumber = 0;
+  private seedHash = '';
+  private serverSeed = '';
+  private crashPoint = 1.0;
+  private houseEdgePercent = 5;
+  private bettingEndsAtMs = 0;
+  private flightStartedAtMs = 0;
+  private crashAtMs = 0;
+  private bets: PalancaJetBet[] = [];
+  private history: PalancaJetHistoryRound[] = [];
+  private chat: PalancaJetChatMessage[] = [
+    {
+      id: 'jet_sys_welcome',
+      userId: 'system',
+      userName: 'Torre Luanda',
+      text: 'Bem-vindo ao Palanca Jet! Aposte antes da descolagem e levante antes do crash. Provably Fair SHA-256 ativo.',
+      timestamp: new Date().toLocaleTimeString('pt-AO', { hour: '2-digit', minute: '2-digit' })
+    }
+  ];
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private nextRoundTimer: ReturnType<typeof setTimeout> | null = null;
+  private isHandlingCrash = false;
+  private processingAutoCashouts = new Set<string>();
+  private lastBroadcastBettingSec = -1;
+
+  async start(): Promise<void> {
+    const [latestNum, history] = await Promise.all([
+      db.getLatestJetRoundNumber(),
+      db.getJetHistory(25)
+    ]);
+    this.roundNumber = latestNum;
+    this.history = history;
+    await this.startNewRound();
+    if (this.tickTimer) clearInterval(this.tickTimer);
+    this.tickTimer = setInterval(() => {
+      void this.tick();
+    }, 75);
+  }
+
+  private async startNewRound(): Promise<void> {
+    if (this.nextRoundTimer) {
+      clearTimeout(this.nextRoundTimer);
+      this.nextRoundTimer = null;
+    }
+    this.isHandlingCrash = false;
+    this.processingAutoCashouts.clear();
+
+    const now = Date.now();
+    this.roundNumber += 1;
+    this.roundId = `jet_${this.roundNumber}_${crypto.randomBytes(4).toString('hex')}`;
+    this.serverSeed = crypto.randomBytes(32).toString('hex');
+    this.seedHash = crypto.createHash('sha256').update(this.serverSeed).digest('hex');
+    this.houseEdgePercent = platformConfig.jetConfig?.houseEdgePercent ?? 5;
+
+    const gameHashHex = crypto
+      .createHash('sha256')
+      .update(`${this.serverSeed}:${this.roundId}:${this.houseEdgePercent}`)
+      .digest('hex');
+
+    this.crashPoint = computeCrashPointFromGameHashHex(gameHashHex, this.houseEdgePercent);
+    const bettingSec = Math.max(4, Math.min(30, platformConfig.jetConfig?.bettingDurationSec ?? 8));
+    this.phase = 'BETTING';
+    this.bettingEndsAtMs = now + bettingSec * 1000;
+    this.flightStartedAtMs = 0;
+    this.crashAtMs = 0;
+    this.bets = [];
+    this.lastBroadcastBettingSec = bettingSec;
+
+    await db.createJetRound({
+      id: this.roundId,
+      roundNumber: this.roundNumber,
+      seedHash: this.seedHash,
+      serverSeed: this.serverSeed,
+      crashPoint: this.crashPoint,
+      houseEdgePercent: this.houseEdgePercent,
+      bettingEndsAtMs: this.bettingEndsAtMs
+    });
+
+    this.broadcastState();
+  }
+
+  private async tick(): Promise<void> {
+    const now = Date.now();
+
+    if (this.phase === 'BETTING') {
+      const remMs = Math.max(0, this.bettingEndsAtMs - now);
+      if (remMs <= 0) {
+        this.phase = 'FLYING';
+        this.flightStartedAtMs = now;
+        const durationMs =
+          this.crashPoint <= 1.0
+            ? 120
+            : Math.max(150, computeElapsedMsForMultiplier(this.crashPoint));
+        this.crashAtMs = this.flightStartedAtMs + durationMs;
+        await db.markJetRoundFlying(this.roundId, this.flightStartedAtMs);
+        this.broadcastState();
+        return;
+      }
+
+      const remSec = Math.ceil(remMs / 1000);
+      if (remSec !== this.lastBroadcastBettingSec) {
+        this.lastBroadcastBettingSec = remSec;
+        this.broadcastTick({
+          roundId: this.roundId,
+          phase: 'BETTING',
+          multiplier: 1.0,
+          bettingRemainingMs: remMs,
+          elapsedMs: 0,
+          serverNowMs: now
+        });
+      }
+      return;
+    }
+
+    if (this.phase === 'FLYING' && !this.isHandlingCrash) {
+      const elapsedMs = Math.max(0, now - this.flightStartedAtMs);
+      const rawMult = computeMultiplierAtElapsedMs(elapsedMs);
+      const currentMult = Math.min(this.crashPoint, rawMult);
+
+      // Server-side Auto-Cashouts (strictly below crashPoint and strictly before crashAtMs)
+      if (now < this.crashAtMs && this.crashPoint > 1.0) {
+        for (const bet of this.bets) {
+          if (
+            bet.status === 'PLACED' &&
+            bet.autoCashoutMultiplier !== null &&
+            bet.autoCashoutMultiplier < this.crashPoint &&
+            currentMult >= bet.autoCashoutMultiplier &&
+            !this.processingAutoCashouts.has(bet.id)
+          ) {
+            this.processingAutoCashouts.add(bet.id);
+            void this.executeAutoCashout(bet, bet.autoCashoutMultiplier);
+          }
+        }
+      }
+
+      if (now >= this.crashAtMs || rawMult >= this.crashPoint) {
+        await this.handleCrash();
+        return;
+      }
+
+      this.broadcastTick({
+        roundId: this.roundId,
+        phase: 'FLYING',
+        multiplier: currentMult,
+        bettingRemainingMs: 0,
+        elapsedMs,
+        serverNowMs: now
+      });
+    }
+  }
+
+  private async executeAutoCashout(bet: PalancaJetBet, targetMult: number): Promise<void> {
+    try {
+      const maxWinKz = platformConfig.jetConfig?.maxWinKz ?? 500000;
+      const result = await db.cashoutJetBet({
+        roundId: bet.roundId,
+        betId: bet.id,
+        userId: bet.userId,
+        multiplier: targetMult,
+        maxWinKz
+      });
+      if (!result.ok) return;
+
+      const idx = this.bets.findIndex((b) => b.id === bet.id);
+      if (idx !== -1) {
+        this.bets[idx] = result.bet;
+      }
+      this.broadcastBets();
+      await pushUserSync(bet.userId);
+      if (!bet.isDemo) {
+        broadcastAdminRefresh();
+        if (result.payout >= 2000 || targetMult >= 5) {
+          await notifyAndPushUser({
+            userId: bet.userId,
+            title: 'Vitória no Palanca Jet!',
+            body: `Levantamento automático em ${targetMult.toFixed(2)}x: ganhaste ${result.payout.toLocaleString('pt-AO')} Kz!`,
+            pushBody: `Ganhaste ${result.payout.toLocaleString('pt-AO')} Kz no Palanca Jet!`,
+            type: 'system',
+            url: '/?tab=wallet'
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[N – JET] Auto-cashout error:', err);
+    }
+  }
+
+  private async handleCrash(): Promise<void> {
+    if (this.isHandlingCrash || this.phase !== 'FLYING') return;
+    this.isHandlingCrash = true;
+    this.phase = 'CRASHED';
+
+    const crashedRoundId = this.roundId;
+    const crashedRoundNumber = this.roundNumber;
+    const crashedSeedHash = this.seedHash;
+    const crashedServerSeed = this.serverSeed;
+    const crashedPoint = this.crashPoint;
+    const crashedEdge = this.houseEdgePercent;
+
+    try {
+      const { affectedUsers, settledBets } = await db.settleJetRoundCrash({
+        roundId: crashedRoundId,
+        crashPoint: crashedPoint
+      });
+
+      this.bets = settledBets;
+      const histItem: PalancaJetHistoryRound = {
+        id: crashedRoundId,
+        roundNumber: crashedRoundNumber,
+        seedHash: crashedSeedHash,
+        serverSeed: crashedServerSeed,
+        crashPoint: crashedPoint,
+        houseEdgePercent: crashedEdge,
+        crashedAt: new Date().toLocaleString('pt-AO')
+      };
+      this.history = [histItem, ...this.history].slice(0, 25);
+
+      this.broadcastState();
+      for (const u of affectedUsers) {
+        await pushUserSync(u.id);
+      }
+      if (affectedUsers.length > 0 || settledBets.some((b) => !b.isDemo)) {
+        broadcastAdminRefresh();
+      }
+    } catch (err) {
+      console.error('[N – JET] settleCrash error:', err);
+      this.broadcastState();
+    }
+
+    this.nextRoundTimer = setTimeout(() => {
+      void this.startNewRound();
+    }, 4000);
+  }
+
+  async placeBet(params: {
+    userId: string;
+    roundId: string;
+    slot: 0 | 1;
+    amount: number;
+    isDemo: boolean;
+    autoCashoutMultiplier: number | null;
+  }) {
+    if (this.phase !== 'BETTING' || params.roundId !== this.roundId) {
+      return { ok: false as const, error: 'As apostas para esta ronda já fecharam. Aguarde a próxima ronda.' };
+    }
+    const result = await db.placeJetBet({
+      roundId: this.roundId,
+      roundNumber: this.roundNumber,
+      userId: params.userId,
+      slot: params.slot,
+      amount: params.amount,
+      isDemo: params.isDemo,
+      autoCashoutMultiplier: params.autoCashoutMultiplier
+    });
+    if (!result.ok) return result;
+
+    this.bets.push(result.bet);
+    this.broadcastBets();
+    await pushUserSync(params.userId);
+    if (!params.isDemo) broadcastAdminRefresh();
+    return { ok: true as const, bet: result.bet, user: result.user };
+  }
+
+  async cancelBet(params: { userId: string; roundId: string; slot: 0 | 1 }) {
+    if (this.phase !== 'BETTING' || params.roundId !== this.roundId) {
+      return { ok: false as const, error: 'Só é possível cancelar durante a fase de apostas.' };
+    }
+    const result = await db.cancelJetBet({
+      roundId: this.roundId,
+      userId: params.userId,
+      slot: params.slot
+    });
+    if (!result.ok) return result;
+
+    this.bets = this.bets.filter((b) => b.id !== result.betId);
+    this.broadcastBets();
+    await pushUserSync(params.userId);
+    broadcastAdminRefresh();
+    return { ok: true as const, user: result.user };
+  }
+
+  async cashoutBet(params: { userId: string; roundId: string; betId: string }) {
+    const now = Date.now();
+    if (this.phase !== 'FLYING' || params.roundId !== this.roundId || this.isHandlingCrash) {
+      return { ok: false as const, error: 'O voo já terminou ou ainda não descolou.' };
+    }
+    if (now >= this.crashAtMs || this.crashPoint <= 1.0) {
+      return { ok: false as const, error: 'Demasiado tarde! O jato já caiu.' };
+    }
+
+    const elapsedMs = Math.max(0, now - this.flightStartedAtMs);
+    const currentMult = computeMultiplierAtElapsedMs(elapsedMs);
+    if (currentMult < 1.01 || currentMult >= this.crashPoint) {
+      return { ok: false as const, error: 'Multiplicador indisponível para levantamento neste instante.' };
+    }
+
+    const maxWinKz = platformConfig.jetConfig?.maxWinKz ?? 500000;
+    const result = await db.cashoutJetBet({
+      roundId: this.roundId,
+      betId: params.betId,
+      userId: params.userId,
+      multiplier: currentMult,
+      maxWinKz
+    });
+    if (!result.ok) return result;
+
+    const idx = this.bets.findIndex((b) => b.id === result.bet.id);
+    if (idx !== -1) {
+      this.bets[idx] = result.bet;
+    }
+    this.broadcastBets();
+    await pushUserSync(params.userId);
+
+    if (!result.bet.isDemo) {
+      broadcastAdminRefresh();
+      if (result.payout >= 2000 || currentMult >= 5) {
+        await notifyAndPushUser({
+          userId: params.userId,
+          title: 'Vitória no Palanca Jet!',
+          body: `Levantaste em ${currentMult.toFixed(2)}x e ganhaste ${result.payout.toLocaleString('pt-AO')} Kz!`,
+          pushBody: `Ganhaste ${result.payout.toLocaleString('pt-AO')} Kz no Palanca Jet!`,
+          type: 'system',
+          url: '/?tab=wallet'
+        });
+      }
+    }
+
+    return {
+      ok: true as const,
+      bet: result.bet,
+      user: result.user,
+      payout: result.payout
+    };
+  }
+
+  addChatMessage(params: { userId: string; userName: string; text: string }): PalancaJetChatMessage | null {
+    const cleanText = String(params.text || '').trim().slice(0, 200);
+    if (!cleanText) return null;
+    const msg: PalancaJetChatMessage = {
+      id: `jchat_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+      userId: params.userId,
+      userName: params.userName,
+      text: cleanText,
+      timestamp: new Date().toLocaleTimeString('pt-AO', { hour: '2-digit', minute: '2-digit' })
+    };
+    this.chat = [...this.chat.slice(-49), msg];
+    const payload = JSON.stringify({ type: 'jet:chat', message: msg });
+    for (const clientWs of clientsMap.keys()) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(payload);
+      }
+    }
+    return msg;
+  }
+
+  getPublicState(): PalancaJetPublicState {
+    const now = Date.now();
+    const elapsedMs =
+      this.phase === 'FLYING'
+        ? Math.max(0, now - this.flightStartedAtMs)
+        : this.phase === 'CRASHED' && this.flightStartedAtMs > 0
+        ? Math.max(0, this.crashAtMs - this.flightStartedAtMs)
+        : 0;
+
+    const multiplier =
+      this.phase === 'BETTING'
+        ? 1.0
+        : this.phase === 'FLYING'
+        ? Math.min(this.crashPoint, computeMultiplierAtElapsedMs(elapsedMs))
+        : this.crashPoint;
+
+    return {
+      phase: this.phase,
+      roundId: this.roundId,
+      roundNumber: this.roundNumber,
+      seedHash: this.seedHash,
+      // CRITICAL FAIRNESS INVARIANT: never reveal serverSeed or crashPoint before CRASHED
+      serverSeed: this.phase === 'CRASHED' ? this.serverSeed : null,
+      crashPoint: this.phase === 'CRASHED' ? this.crashPoint : null,
+      houseEdgePercent: this.houseEdgePercent,
+      multiplier,
+      bettingRemainingMs: this.phase === 'BETTING' ? Math.max(0, this.bettingEndsAtMs - now) : 0,
+      elapsedMs,
+      serverNowMs: now,
+      bets: this.bets,
+      history: this.history,
+      chat: this.chat
+    };
+  }
+
+  private broadcastState(): void {
+    const payload = JSON.stringify({ type: 'jet:state', state: this.getPublicState() });
+    for (const clientWs of clientsMap.keys()) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(payload);
+      }
+    }
+  }
+
+  private broadcastBets(): void {
+    const payload = JSON.stringify({
+      type: 'jet:bets',
+      roundId: this.roundId,
+      bets: this.bets
+    });
+    for (const clientWs of clientsMap.keys()) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(payload);
+      }
+    }
+  }
+
+  private broadcastTick(data: {
+    roundId: string;
+    phase: PalancaJetPhase;
+    multiplier: number;
+    bettingRemainingMs: number;
+    elapsedMs: number;
+    serverNowMs: number;
+  }): void {
+    const payload = JSON.stringify({ type: 'jet:tick', ...data });
+    for (const clientWs of clientsMap.keys()) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(payload);
+      }
+    }
+  }
+}
+
+const jetManager = new PalancaJetManager();
+
 async function startServer() {
   await db.init();
+  const refundedCount = await db.recoverInterruptedJetRounds();
+  if (refundedCount > 0) {
+    console.log(`[N – JET] Recuperação no arranque: ${refundedCount} aposta(s) pendente(s) reembolsada(s).`);
+  }
   platformConfig = await db.getPlatformConfig();
+  await jetManager.start();
 
   const app = express();
   app.use(express.json({ limit: '5mb' }));
@@ -1118,6 +1572,7 @@ async function startServer() {
           db.getPaymentSettings(),
           db.getPlatformConfig()
         ]);
+      broadcastAdminRefresh();
       res.status(201).json({
         user: result.user,
         token: result.token,
@@ -1244,6 +1699,119 @@ async function startServer() {
     } catch (err) {
       console.error('[N – API] PATCH /api/me error:', err);
       res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+    }
+  });
+
+  app.patch('/api/me/responsible-gaming', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const body = req.body || {};
+      const parseLimit = (val: unknown): number | null | undefined => {
+        if (val === undefined) return undefined;
+        if (val === null || val === '') return null;
+        return Number(val);
+      };
+      const result = await db.updateResponsibleGaming({
+        userId: req.session!.userId,
+        dailyEntryLimitKz: parseLimit(body.dailyEntryLimitKz),
+        dailyLossLimitKz: parseLimit(body.dailyLossLimitKz),
+        selfExclusionHours:
+          body.selfExclusionHours !== undefined && body.selfExclusionHours !== null
+            ? Number(body.selfExclusionHours)
+            : undefined
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      await pushUserSync(result.user.id);
+      res.json({ user: result.user });
+    } catch (err) {
+      console.error('[N – API] PATCH /api/me/responsible-gaming error:', err);
+      res.status(500).json({ error: 'Erro ao atualizar limites de jogo responsável.' });
+    }
+  });
+
+  // ---------- Palanca Jet (Server-Authoritative Crash Endpoints) ----------
+  app.get('/api/jet/state', (_req, res) => {
+    res.json({ state: jetManager.getPublicState(), jetConfig: platformConfig.jetConfig });
+  });
+
+  app.get('/api/jet/verify/:roundKey', async (req, res) => {
+    try {
+      const round = await db.getJetRoundByIdOrNumber(String(req.params.roundKey || ''));
+      if (!round) {
+        res.status(404).json({ error: 'Ronda não encontrada.' });
+        return;
+      }
+      res.json({ round });
+    } catch (err) {
+      console.error('[N – JET] GET /api/jet/verify error:', err);
+      res.status(500).json({ error: 'Erro ao consultar verificação da ronda.' });
+    }
+  });
+
+  app.post('/api/jet/bet', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { roundId, slot, amount, isDemo, autoCashoutMultiplier } = req.body || {};
+      const result = await jetManager.placeBet({
+        userId: req.session!.userId,
+        roundId: String(roundId || ''),
+        slot: Number(slot) === 1 ? 1 : 0,
+        amount: Number(amount),
+        isDemo: Boolean(isDemo),
+        autoCashoutMultiplier:
+          autoCashoutMultiplier === null ||
+          autoCashoutMultiplier === undefined ||
+          autoCashoutMultiplier === ''
+            ? null
+            : Number(autoCashoutMultiplier)
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.status(201).json({ bet: result.bet, user: result.user });
+    } catch (err) {
+      console.error('[N – JET] POST /api/jet/bet error:', err);
+      res.status(500).json({ error: 'Erro ao registar aposta no Palanca Jet.' });
+    }
+  });
+
+  app.post('/api/jet/cancel', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { roundId, slot } = req.body || {};
+      const result = await jetManager.cancelBet({
+        userId: req.session!.userId,
+        roundId: String(roundId || ''),
+        slot: Number(slot) === 1 ? 1 : 0
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json({ user: result.user });
+    } catch (err) {
+      console.error('[N – JET] POST /api/jet/cancel error:', err);
+      res.status(500).json({ error: 'Erro ao cancelar aposta no Palanca Jet.' });
+    }
+  });
+
+  app.post('/api/jet/cashout', requireUser, async (req: AuthedRequest, res) => {
+    try {
+      const { roundId, betId } = req.body || {};
+      const result = await jetManager.cashoutBet({
+        userId: req.session!.userId,
+        roundId: String(roundId || ''),
+        betId: String(betId || '')
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json({ bet: result.bet, user: result.user, payout: result.payout });
+    } catch (err) {
+      console.error('[N – JET] POST /api/jet/cashout error:', err);
+      res.status(500).json({ error: 'Erro ao efetuar levantamento no Palanca Jet.' });
     }
   });
 
@@ -1796,7 +2364,40 @@ async function startServer() {
           rooms: getVisibleRoomsForUser(meta.userId),
           onlineCount: getOnlineCount()
         });
+        sendToClient(ws, {
+          type: 'jet:state',
+          state: jetManager.getPublicState()
+        });
         broadcastRoomsList();
+        return;
+      }
+
+      if (type === 'jet:cashout') {
+        if (!meta.userId) {
+          sendToClient(ws, { type: 'error', message: 'Inicie sessão para levantar ganhos.' });
+          return;
+        }
+        const res = await jetManager.cashoutBet({
+          userId: meta.userId,
+          roundId: String(msg.roundId || ''),
+          betId: String(msg.betId || '')
+        });
+        if (!res.ok) {
+          sendToClient(ws, { type: 'error', message: res.error });
+        }
+        return;
+      }
+
+      if (type === 'jet:chat') {
+        if (!meta.userId) {
+          sendToClient(ws, { type: 'error', message: 'Inicie sessão para escrever no chat.' });
+          return;
+        }
+        jetManager.addChatMessage({
+          userId: meta.userId,
+          userName: meta.userName,
+          text: String(msg.text || '')
+        });
         return;
       }
 
@@ -2511,6 +3112,10 @@ async function startServer() {
     res.sendFile(swFile);
   });
 
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -2532,9 +3137,6 @@ async function startServer() {
         }
       })
     );
-    app.use('/api', (_req, res) => {
-      res.status(404).json({ error: 'Not found' });
-    });
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

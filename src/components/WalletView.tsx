@@ -184,7 +184,7 @@ export const WalletView: React.FC = () => {
         </div>
       </div>
 
-      {/* DUAL BALANCE CARDS + SALDO DEMO - With zero real balance rule notice */}
+      {/* BALANCES GRID - Real KZ, Real USDT, Demo KZ */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Card Saldo Real KZ */}
         <div className="rounded-2xl p-6 bg-gradient-to-br from-[#1c1d22] to-[#121317] border border-red-900/40 shadow-xl relative overflow-hidden">
@@ -800,7 +800,7 @@ export const WalletView: React.FC = () => {
               </label>
               <input
                 type="number"
-                min={selectedCurrency === 'KZ' ? 500 : 5}
+                min={selectedCurrency === 'KZ' ? (platformConfig.minWithdrawKz ?? 500) : 5}
                 max={selectedCurrency === 'KZ' ? currentUser.kzBalance : currentUser.usdtBalance}
                 value={withdrawAmount}
                 onChange={(e) => setWithdrawAmount(Number(e.target.value))}
@@ -823,6 +823,14 @@ export const WalletView: React.FC = () => {
             </div>
 
             <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 text-xs text-neutral-400 space-y-1">
+              <div className="flex justify-between">
+                <span>Levantamento mínimo:</span>
+                <span className="font-bold text-yellow-400 tabular-nums">
+                  {selectedCurrency === 'KZ'
+                    ? `${(platformConfig.minWithdrawKz ?? 500).toLocaleString('pt-AO')} Kz (Saldo Real)`
+                    : '5 USDT'}
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span>Taxa de processamento:</span>
                 <span className="font-bold text-white">{selectedCurrency === 'KZ' ? '100 Kz' : '1 USDT'}</span>
@@ -871,19 +879,40 @@ export const WalletView: React.FC = () => {
                 </thead>
                 <tbody className="divide-y divide-neutral-800/80">
                   {transactions.map((tx) => {
-                    const isOutflow = tx.type === 'WITHDRAW' || tx.type === 'BET_ENTRY' || tx.type === 'THEME_UNLOCK';
+                    const rawType = String(tx.type);
+                    const isOutflow =
+                      rawType === 'WITHDRAW' ||
+                      rawType === 'BET_ENTRY' ||
+                      rawType === 'THEME_UNLOCK' ||
+                      rawType === 'JET_BET' ||
+                      rawType === 'PUZZLE_ENTRY';
+                    const isBankLoss = rawType === 'JET_LOSS' || rawType === 'PUZZLE_LOSS';
                     const typeLabel =
-                      tx.type === 'DEPOSIT'
+                      rawType === 'DEPOSIT'
                         ? 'Depósito'
-                        : tx.type === 'WITHDRAW'
+                        : rawType === 'WITHDRAW'
                         ? 'Levantamento'
-                        : tx.type === 'BET_WIN'
+                        : rawType === 'BET_WIN'
                         ? 'Prémio de Partida'
-                        : tx.type === 'BET_ENTRY'
+                        : rawType === 'BET_ENTRY'
                         ? 'Entrada em Mesa'
-                        : tx.type === 'THEME_UNLOCK'
+                        : rawType === 'JET_BET'
+                        ? 'Aposta Palanca Jet'
+                        : rawType === 'JET_WIN'
+                        ? 'Prémio Palanca Jet'
+                        : rawType === 'JET_LOSS'
+                        ? 'Palanca Jet (Crash)'
+                        : rawType === 'JET_REFUND'
+                        ? 'Reembolso Palanca Jet'
+                        : rawType === 'PUZZLE_ENTRY'
+                        ? 'Entrada Puzzle (Histórico)'
+                        : rawType === 'PUZZLE_WIN'
+                        ? 'Prémio Puzzle (Histórico)'
+                        : rawType === 'PUZZLE_LOSS'
+                        ? 'Puzzle (Histórico Banca)'
+                        : rawType === 'THEME_UNLOCK'
                         ? `Tabuleiro (${tx.themeName || tx.themeId || 'Premium'})`
-                        : tx.type === 'bonus'
+                        : rawType === 'bonus'
                         ? 'Bónus Recebido'
                         : 'Comissão';
                     return (
@@ -891,7 +920,7 @@ export const WalletView: React.FC = () => {
                         <td className="p-3 text-neutral-400 whitespace-nowrap">{tx.createdAt}</td>
                         <td className="p-3 font-semibold text-white">
                           <span className="block">{typeLabel}</span>
-                          {tx.type === 'bonus' && (tx.reason || tx.notes) && (
+                          {(tx.reason || tx.notes) && (rawType === 'bonus' || rawType.startsWith('JET_') || rawType.startsWith('PUZZLE_')) && (
                             <span className="text-[10px] text-yellow-400 font-normal block">
                               {tx.reason || tx.notes}
                             </span>
@@ -900,9 +929,15 @@ export const WalletView: React.FC = () => {
                         <td className="p-3 text-neutral-300 font-mono text-[11px]">{tx.method}</td>
                         <td className="p-3 font-mono text-neutral-400 text-[11px]">{tx.reference}</td>
                         <td className="p-3 font-bold tabular-nums whitespace-nowrap">
-                          <span className={isOutflow ? 'text-red-400' : 'text-emerald-400'}>
-                            {isOutflow ? '-' : '+'}{tx.amount.toLocaleString('pt-AO')} {tx.currency}
-                          </span>
+                          {isBankLoss ? (
+                            <span className="text-red-400">
+                              {tx.amount.toLocaleString('pt-AO')} {tx.currency} (Banca)
+                            </span>
+                          ) : (
+                            <span className={isOutflow ? 'text-red-400' : 'text-emerald-400'}>
+                              {isOutflow ? '-' : '+'}{tx.amount.toLocaleString('pt-AO')} {tx.currency}
+                            </span>
+                          )}
                         </td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -956,16 +991,20 @@ export const WalletView: React.FC = () => {
                 <tbody className="divide-y divide-neutral-800/80">
                   {matchHistory.map((m) => {
                     const iWon = m.winnerUserId === currentUser.id;
+                    const isJet = m.gameType === 'palanca_jet';
+                    const isPuzzle = m.gameType === 'puzzle_angola';
                     return (
                       <tr key={m.id} className="hover:bg-neutral-800/40">
                         <td className="p-3 text-neutral-400 whitespace-nowrap">{m.finishedAt}</td>
                         <td className="p-3">
                           <span className="font-bold text-white block">{m.roomName}</span>
-                          <span className="text-[10px] font-mono text-yellow-400">{m.roomCode}</span>
+                          <span className="text-[10px] font-mono text-yellow-400">
+                            {m.roomCode} {isJet ? '· Palanca Jet' : isPuzzle ? '· Puzzle (Histórico)' : ''}
+                          </span>
                         </td>
                         <td className="p-3">
                           <span className={`font-bold ${iWon ? 'text-emerald-400' : 'text-neutral-200'}`}>
-                            {m.winnerName || 'N/D'} {iWon ? '(Você 🏆)' : ''}
+                            {m.winnerName || (isJet || isPuzzle ? 'Banca N' : 'N/D')} {iWon ? '(Você 🏆)' : ''}
                           </span>
                         </td>
                         <td className="p-3">
@@ -980,7 +1019,7 @@ export const WalletView: React.FC = () => {
                         <td className="p-3 tabular-nums text-neutral-300">
                           {m.betAmount.toLocaleString('pt-AO')} {m.currency}
                         </td>
-                        <td className="p-3 font-bold tabular-nums text-emerald-400">
+                        <td className={`p-3 font-bold tabular-nums ${m.prizePool > 0 ? 'text-emerald-400' : 'text-neutral-500'}`}>
                           {m.prizePool.toLocaleString('pt-AO')} {m.currency}
                         </td>
                       </tr>

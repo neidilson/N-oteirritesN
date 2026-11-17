@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nti-static-v4';
+const CACHE_NAME = 'nti-static-v6';
 
 const PRECACHE_URLS = [
   '/',
